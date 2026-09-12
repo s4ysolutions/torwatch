@@ -252,7 +252,6 @@ export class MkvDemuxer {
   }
 
   async *walkCluster(pay, end, want, fromSec, toSec) {
-    const buf = this.stream.buf;
     let q = pay;
     let clusterTs = 0;
     while (q < end) {
@@ -261,12 +260,14 @@ export class MkvDemuxer {
       } catch {
         return;
       }
-      const h = readElementHeader(buf, q);
+      // NB: buffer must be re-read after every await — ensure() replaces
+      // the internal array when it grows, so no stale reference survives.
+      const h = readElementHeader(this.stream.buf, q);
       const v = q + h.headerSize;
       const pend = h.size === -1 ? end : v + h.size;
       if (h.id === ID_TIMESTAMP) {
         await this.stream.ensure(v, h.size);
-        clusterTs = uintOf(buf.slice(v, v + h.size));
+        clusterTs = uintOf(this.stream.buf.slice(v, v + h.size));
       } else if (h.id === ID_SIMPLE_BLOCK) {
         await this.stream.ensure(v, h.size);
         const b = this.parseBlockPayload(v, h.size, clusterTs);

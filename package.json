@@ -1,1 +1,1 @@
-{"type": "module", "scripts": {"test": "node --test static/demux/ static/util/"}}
+{"type": "module", "scripts": {"test": "node --test \"static/demux/*.test.js\" \"static/util/*.test.js\""}}

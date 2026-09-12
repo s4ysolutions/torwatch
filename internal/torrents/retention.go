@@ -46,15 +46,25 @@ func (m *Manager) setLastUsed(id string, t time.Time) {
 	}
 }
 
-// removeLocked drops id from the client and its data subdir.
+// removeLocked drops id from the client and deletes its real storage path.
+// anacrolix lays out bytes under dataDir/<torrent name>, not dataDir/<id>,
+// so evict by the handle's Name() (captured before Drop); the legacy id
+// path goes too. Best-effort: missing paths are fine (RemoveAll).
 // Caller must hold m.mu.
 func (m *Manager) removeLocked(id string) {
 	e, ok := m.byID[id]
 	if !ok {
 		return
 	}
+	name := e.t.Name()
+	if name == "" {
+		name = e.name
+	}
 	e.t.Drop()
 	delete(m.byID, id)
+	if name != "" && name != id {
+		_ = os.RemoveAll(filepath.Join(m.dataDir, name))
+	}
 	_ = os.RemoveAll(filepath.Join(m.dataDir, id))
 }
 

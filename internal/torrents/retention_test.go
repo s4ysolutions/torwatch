@@ -1,6 +1,8 @@
 package torrents
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -100,5 +102,39 @@ func TestFileReaderTouchesLastUsed(t *testing.T) {
 	}
 	if !got.After(old) {
 		t.Fatalf("lastUsed not touched: %v vs %v", got, old)
+	}
+}
+
+// TestCleanupRemovesRealStoragePath covers the anacrolix layout: bytes live
+// under dataDir/<torrent name>, not dataDir/<infohash>. Eviction must delete
+// the name path (and the legacy id path) with the real dirSizeWalk.
+func TestCleanupRemovesRealStoragePath(t *testing.T) {
+	now := time.Now()
+	m, fc := newTestManager(t)
+	id, err := m.Add(testMagnet)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	fc.releaseInfo()
+	namePath := filepath.Join(m.dataDir, "video.mp4")
+	if err := os.MkdirAll(namePath, 0o755); err != nil {
+		t.Fatalf("mkdir name path: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(namePath, "video.mp4"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("write name path file: %v", err)
+	}
+	legacyPath := filepath.Join(m.dataDir, id)
+	if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+		t.Fatalf("mkdir legacy path: %v", err)
+	}
+	m.setLastUsed(id, now.Add(-25*time.Hour))
+	removed := m.RunCleanup(func() time.Time { return now }, 24*time.Hour, 1<<62)
+	if len(removed) != 1 || removed[0] != id {
+		t.Fatalf("removed %v", removed)
+	}
+	for _, p := range []string{namePath, legacyPath} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("storage path not evicted: %v (err %v)", p, err)
+		}
 	}
 }

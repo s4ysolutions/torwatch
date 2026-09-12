@@ -1,0 +1,15 @@
+[Unit]
+Description=torwatch torrent-video streaming service
+After=network.target
+
+[Service]
+Type=simple
+User={{ app_user }}
+WorkingDirectory={{ deploy_dir }}
+EnvironmentFile={{ env_file }}
+ExecStart={{ deploy_dir }}/torwatchd -addr 127.0.0.1:{{ app_port }} -static {{ deploy_dir }}/static -data {{ data_dir }} -ttl {{ ttl }} -max-disk {{ max_disk }}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

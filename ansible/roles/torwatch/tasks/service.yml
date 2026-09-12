@@ -1,0 +1,18 @@
+---
+- name: Install systemd service
+  ansible.builtin.template:
+    src: torwatch.service.j2
+    dest: /etc/systemd/system/torwatch.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart torwatch
+
+- name: Enable and start torwatch
+  ansible.builtin.systemd:
+    name: torwatch
+    enabled: yes
+    state: started
+    daemon_reload: yes

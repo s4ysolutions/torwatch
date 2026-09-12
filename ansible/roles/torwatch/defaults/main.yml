@@ -1,0 +1,36 @@
+---
+# torwatch role defaults — portable only, NO secrets here.
+# Secrets (vault_opensubs_key) are supplied by the caller, e.g. from
+# ~/s4y/oci/ansible/host_vars/torwatch-prod/vault.yml. Ansible fails with a
+# clear "undefined variable" error if a required secret is missing.
+
+# ---- Project checkout location ----
+# role_path is <repo>/ansible/roles/torwatch, so ../../.. is the repo root
+# no matter which playbook (this repo's or the OCI wrapper) runs the role.
+torwatch_project_root: "{{ role_path }}/../../.."
+torwatch_dist_dir: "{{ torwatch_project_root }}/dist"
+
+# ---- Deployment target ----
+app_name: torwatchd
+app_user: opc
+app_group: opc
+deploy_dir: /usr/local/opt/torwatch
+data_dir: /var/lib/torwatch/data
+app_port: 8765
+ttl: 24h
+max_disk: 20GB
+env_file: /etc/torwatch/env
+
+# ---- Domain / TLS ----
+# Overridable by caller (e.g. OCI group_vars). The nginx vhost is rendered
+# HTTP-only until a cert exists; the caller provisions TLS via the shared
+# OCI certbot tasks (see README), which rewrites the vhost in place.
+# Prefers the caller's `domain` (OCI convention, also used by certbot tasks).
+torwatch_domain: "{{ domain | default('torwatch.s4y.solutions') }}"
+enable_ssl: true
+# Required from caller when enable_ssl is true (certbot --email). No default
+# on purpose: undefined variable error beats a wrong email.
+# certbot_email: ...
+
+# ---- Secrets (supplied by caller, empty = disabled) ----
+vault_opensubs_key: ""

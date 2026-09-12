@@ -1,0 +1,76 @@
+---
+# Build the arm64 binary + static tree locally, then copy to the target.
+
+- name: Check local Go toolchain
+  ansible.builtin.command: go version
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: go_version_check
+  changed_when: false
+  failed_when: go_version_check.rc != 0
+
+- name: Cross-build linux/arm64 dist locally
+  ansible.builtin.shell: sh deploy/build-arm64.sh
+  args:
+    chdir: "{{ torwatch_project_root }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
+  register: dist_build
+  changed_when: "'staged in' in dist_build.stdout"
+
+- name: Create deploy directory
+  ansible.builtin.file:
+    path: "{{ deploy_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Create data directory
+  ansible.builtin.file:
+    path: "{{ data_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+
+- name: Create env directory
+  ansible.builtin.file:
+    path: "{{ env_file | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0750"
+
+- name: Copy linux binary
+  ansible.builtin.copy:
+    src: "{{ torwatch_dist_dir }}/torwatchd"
+    dest: "{{ deploy_dir }}/torwatchd"
+    remote_src: no
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0755"
+  notify: Restart torwatch
+
+- name: Copy static frontend
+  ansible.builtin.copy:
+    src: "{{ torwatch_dist_dir }}/static/"
+    dest: "{{ deploy_dir }}/static"
+    remote_src: no
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: "0644"
+  notify: Restart torwatch
+
+- name: Write env file
+  ansible.builtin.copy:
+    dest: "{{ env_file }}"
+    owner: root
+    group: "{{ app_group }}"
+    mode: "0640"
+    content: |
+      OPENSUBTITLES_API_KEY={{ vault_opensubs_key }}
+  no_log: true
+  notify: Restart torwatch

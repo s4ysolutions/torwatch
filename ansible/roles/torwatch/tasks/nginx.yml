@@ -1,0 +1,40 @@
+---
+# HTTP-only vhost. TLS is provisioned by the caller (shared OCI certbot
+# tasks), which rewrites this file in place — so once a cert exists the
+# template render is skipped to avoid clobbering certbot's 443 block.
+
+- name: Check SSL cert exists
+  ansible.builtin.stat:
+    path: /etc/letsencrypt/live/{{ torwatch_domain }}/fullchain.pem
+  register: ssl_check
+
+- name: Check app port free (warning only)
+  ansible.builtin.shell: ss -ltn | grep -q ':{{ app_port }} ' && echo taken || echo free
+  changed_when: false
+  failed_when: false
+  register: port_check
+
+- name: Warn when app port taken
+  ansible.builtin.debug:
+    msg: "Port {{ app_port }} already listening; service may fail to bind."
+  when: "'taken' in port_check.stdout"
+
+- name: Deploy nginx HTTP config (pre-TLS only)
+  ansible.builtin.template:
+    src: nginx-torwatch.conf.j2
+    dest: /etc/nginx/conf.d/{{ torwatch_domain }}.conf
+    owner: root
+    group: root
+    mode: "0644"
+  when: not (ssl_check.stat.exists and enable_ssl)
+  notify: Reload nginx
+
+- name: Test nginx config
+  ansible.builtin.command: nginx -t
+  changed_when: false
+
+- name: Enable and start nginx
+  ansible.builtin.systemd:
+    name: nginx
+    enabled: yes
+    state: started

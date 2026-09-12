@@ -1,0 +1,32 @@
+---
+# Base OS deps. torwatchd itself needs nothing except the binary, but the
+# box needs nginx + firewall, same as every other OCI web service.
+
+- name: Disable broken pgdg13 repo
+  ansible.builtin.shell: dnf config-manager --disable pgdg13
+  changed_when: false
+  failed_when: false
+
+- name: Install base packages
+  ansible.builtin.dnf:
+    name:
+      - nginx
+      - policycoreutils-python-utils
+    state: present
+    disablerepo: "pgdg13"
+
+- name: Open firewall ports
+  ansible.builtin.firewalld:
+    service: "{{ item }}"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - http
+    - https
+
+- name: Allow nginx to proxy to backend (SELinux)
+  ansible.builtin.seboolean:
+    name: httpd_can_network_connect
+    state: yes
+    persistent: yes

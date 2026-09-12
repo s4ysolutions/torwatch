@@ -1,0 +1,33 @@
+---
+- name: Deploy torwatch to torwatch host
+  hosts: torwatch
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: torwatch
+
+  post_tasks:
+    - name: Wait for app port
+      ansible.builtin.wait_for:
+        port: "{{ app_port }}"
+        host: 127.0.0.1
+        timeout: 120
+        state: started
+
+    - name: Health check API
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_port }}/api/health"
+        return_content: true
+      register: health_check
+      until: health_check.status == 200
+      retries: 10
+      delay: 3
+
+    - name: Report deployment result
+      ansible.builtin.debug:
+        msg:
+          - "torwatch deployed to {{ inventory_hostname }} ({{ ansible_host | default(inventory_hostname) }})"
+          - "API:  http://127.0.0.1:{{ app_port }}/api/health"
+          - "Site: https://{{ torwatch_domain }}/ (nginx -> 127.0.0.1:{{ app_port }})"
+          - "Data: {{ data_dir }} (ttl={{ ttl }}, max-disk={{ max_disk }})"

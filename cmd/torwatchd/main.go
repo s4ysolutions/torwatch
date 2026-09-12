@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -56,5 +57,5 @@ func main() {
 	}
 	defer m.Close()
 	go m.StartCleanup(context.Background(), *ttl, maxDisk, 10*time.Minute)
-	log.Fatal(http.ListenAndServe(*addr, server.New(*staticDir, m)))
+	log.Fatal(http.ListenAndServe(*addr, server.New(*staticDir, m, server.Opts{OpensubsKey: os.Getenv("OPENSUBTITLES_API_KEY")})))
 }

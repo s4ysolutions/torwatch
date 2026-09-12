@@ -1,6 +1,7 @@
 package torrents
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/anacrolix/torrent"
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 // ErrNotFound is returned when a magnet id (or file index) is unknown.
@@ -41,6 +43,7 @@ type torrentIface interface {
 // clientIface mirrors the *torrent.Client methods Manager uses.
 type clientIface interface {
 	AddMagnet(string) (torrentIface, error)
+	AddTorrent(*metainfo.MetaInfo) (torrentIface, error)
 	Close()
 }
 
@@ -74,6 +77,14 @@ type realClient struct{ c *torrent.Client }
 
 func (r *realClient) AddMagnet(uri string) (torrentIface, error) {
 	t, err := r.c.AddMagnet(uri)
+	if err != nil {
+		return nil, err
+	}
+	return &realTorrent{t: t}, nil
+}
+
+func (r *realClient) AddTorrent(mi *metainfo.MetaInfo) (torrentIface, error) {
+	t, err := r.c.AddTorrent(mi)
 	if err != nil {
 		return nil, err
 	}
@@ -147,6 +158,39 @@ func (m *Manager) Add(magnet string) (string, error) {
 	return id, nil
 }
 
+// AddTorrentFile parses raw .torrent bytes, returns infohash hex.
+// Same entry map keyed by infohash: same torrent twice → same id.
+func (m *Manager) AddTorrentFile(data []byte) (string, error) {
+	mi, err := metainfo.Load(bytes.NewReader(data))
+	if err != nil {
+		return "", err
+	}
+	id := mi.HashInfoBytes().HexString()
+	m.mu.Lock()
+	if e, ok := m.byID[id]; ok {
+		e.lastUsed = time.Now()
+		m.mu.Unlock()
+		return id, nil
+	}
+	t, err := m.client.AddTorrent(mi)
+	if err != nil {
+		m.mu.Unlock()
+		return "", err
+	}
+	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
+	m.byID[id] = e
+	m.mu.Unlock()
+	go func() {
+		<-t.GotInfo()
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		e.state = "ready"
+		e.files = t.Files()
+		e.name = t.Name()
+	}()
+	return id, nil
+}
+
 // Info returns current state for id.
 func (m *Manager) Info(id string) (MagnetInfo, error) {
 	m.mu.Lock()
@@ -177,11 +221,15 @@ func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, er
 	return e.t.FileReader(index)
 }
 
-// Remove drops id from the client.
-func (m *Manager) Remove(id string) {
+// Remove drops id from the client. Unknown id → ErrNotFound.
+func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, ok := m.byID[id]; !ok {
+		return fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
+	}
 	m.removeLocked(id)
+	return nil
 }
 
 // Close stops the underlying client.

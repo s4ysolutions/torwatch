@@ -22,6 +22,10 @@ func (nopSeekCloser) Close() error { return nil }
 
 func (f *fakeFileManager) Add(magnet string) (string, error) { return "x", nil }
 
+func (f *fakeFileManager) AddTorrentFile(data []byte) (string, error) { return "x", nil }
+
+func (f *fakeFileManager) Remove(id string) error { return nil }
+
 func (f *fakeFileManager) Info(id string) (torrents.MagnetInfo, error) {
 	return torrents.MagnetInfo{ID: id}, nil
 }
@@ -35,7 +39,7 @@ func (f *fakeFileManager) FileReader(id string, index int) (io.ReadSeekCloser, i
 
 func newServerWithFakeManager(t *testing.T, data []byte) *Server {
 	t.Helper()
-	return newServer(t.TempDir(), &fakeFileManager{data: data})
+	return newServer(t.TempDir(), &fakeFileManager{data: data}, Opts{})
 }
 
 func TestStreamFullAndRange(t *testing.T) {
@@ -58,7 +62,7 @@ func TestStreamFullAndRange(t *testing.T) {
 }
 
 func TestStreamUnknownMagnet(t *testing.T) {
-	srv := newServer(t.TempDir(), &fakeFileManager{err: torrents.ErrNotFound})
+	srv := newServer(t.TempDir(), &fakeFileManager{err: torrents.ErrNotFound}, Opts{})
 	r := httptest.NewRecorder()
 	srv.ServeHTTP(r, httptest.NewRequest("GET", "/api/magnets/x/files/0", nil))
 	if r.Code != http.StatusNotFound {

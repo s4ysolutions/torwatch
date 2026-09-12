@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/anacrolix/torrent/metainfo"
 )
 
 const testMagnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567"
@@ -53,6 +55,13 @@ func newFakeClient() *fakeClient {
 }
 
 func (c *fakeClient) AddMagnet(magnet string) (torrentIface, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.addCalls++
+	return &fakeTorrent{gotInfo: c.gotInfo, files: c.files, name: c.name}, nil
+}
+
+func (c *fakeClient) AddTorrent(mi *metainfo.MetaInfo) (torrentIface, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.addCalls++

@@ -20,8 +20,15 @@ as much work as possible.
 2. **Subtitles**: primary source = embedded in the torrent (extracted in browser).
    Additional options: external `.srt`/`.vtt` upload, OpenSubtitles API search
    (optional, needs API key), manual paste/URL.
-3. **Torrent engine**: hybrid — try WebTorrent (WebRTC peers) in browser first,
-   fall back to Go backend (anacrolix/torrent) streaming over HTTP range requests.
+3. **Torrent engine**: backend-only — Go backend (anacrolix/torrent) streams
+   pieces over HTTP range requests. (WebTorrent-in-browser was considered and
+   dropped: browsers reach only WebRTC peers, which fail for ~80–95% of public
+   magnets; not worth the second source path in v1. The source-adapter interface
+   keeps it possible as a later addition.)
+   **Streaming (not full download) is the top priority**: pieces are fetched on
+   demand ordered by playback position; a range request at byte X prioritizes
+   pieces around X; seeking re-prioritizes. The full file is never required
+   before playback starts.
 4. **Scope extras**: localStorage remembers playback position + magnet history;
    server keeps torrents/files for a configured TTL (like yt-subtitles jobs),
    with disk-budget cleanup.
@@ -30,17 +37,15 @@ as much work as possible.
 
 ```
 ┌─ Browser (pure JS, ES modules) ─────────────────┐
-│  magnet → try WebTorrent (WebRTC peers)         │
-│     ├─ works → stream via webtorrent            │
-│     └─ stalls/fails → fallback to Go backend    │
-│         fetch file bytes via HTTP range          │
+│  magnet → POST to Go backend                    │
+│  stream file bytes via HTTP range from backend  │
 │  mkv/mp4 demux → MSE: video + selectable audio   │
 │  subtitle streams extracted → VTT cues           │
 │  Subtitles widget: synced cue list, click-to-seek│
 │  OPFS file cache: survives page reload           │
 │  localStorage: playback position, magnet history │
 └──────────────────────────────────────────────────┘
-        │ fallback only
+        │ HTTP range requests only
 ┌─ Go backend (VPS, 1 binary) ────────────────────┐
 │  anacrolix/torrent: magnet → file set →          │
 │    stream pieces on demand (HTTP range)          │
@@ -50,6 +55,13 @@ as much work as possible.
 │  Serves static frontend                          │
 └──────────────────────────────────────────────────┘
 ```
+
+### CPU split (why the weak VPS is enough)
+
+All CPU-heavy work runs in the browser on the user's machine: MKV→fMP4 remux,
+subtitle extraction/parsing, MSE playback (hardware decode). The VPS only moves
+bytes — the Go torrent client plus HTTP range serving (low CPU; RAM and disk
+are the constrained resources, bounded by config).
 
 ### MKV playback
 
@@ -64,7 +76,7 @@ codecs, non-MSE codecs) → clear error message + offer raw file download.
 ### OPFS local cache
 
 Chunks are written to an OPFS (Origin Private File System) file as they arrive
-(from either source). On page reload the partial or complete file is remounted
+from the backend. On page reload the partial or complete file is remounted
 into the player instantly. Also prevents duplicate VPS bandwidth: backend bytes
 are fetched once. Fallback for browsers without OPFS: IndexedDB blobs, or silent
 re-download. Not available in private browsing. Uses
@@ -79,9 +91,9 @@ static/
   app.js              boot, emitter wiring
   util/      dom.js (el), events.js (emitter), store.js (localStorage)
   domain/    route.js, playerState.js (emitters), tracks.js (audio/subs model)
-  usecases/  loadMagnet.js, pickSource.js (webtorrent→fallback), seek.js,
+  usecases/  loadMagnet.js, seek.js,
              cacheFile.js (OPFS write/read), switchAudio.js, loadSubtitles.js
-  adapters/  webtorrentAdapter.js, backendAdapter.js (HTTP range),
+  adapters/  backendAdapter.js (HTTP range),
              subtitlesAdapter.js (upload/opensubtitles/paste), opfsAdapter.js
   demux/     ebml.js, mkvDemuxer.js, mp4Demuxer.js (mp4box.js vendored),
              fmp4Muxer.js (→ MSE)
@@ -94,7 +106,7 @@ Conventions (from meridian frontend-plain):
 
 - State lives in emitters (`x.subscribe(...)`), never in the DOM.
 - Views have shape `render(container) => disposeFn`.
-- Adapters own all I/O (network, OPFS, localStorage, WebTorrent).
+- Adapters own all I/O (network, OPFS, localStorage).
 - demux/ is pure code — no DOM, unit-testable in node.
 
 ### Subtitles widget
@@ -108,8 +120,7 @@ all shown as selectable entries in the same widget.
 ### Audio track switching
 
 Demuxer lists audio tracks → tracksMenu offers selection → MSE swaps the audio
-SourceBuffer. Works identically for WebTorrent and backend sources (same demux
-path).
+SourceBuffer.
 
 ## Backend (Go)
 
@@ -133,8 +144,8 @@ Single binary `torwatchd`. Serves `static/` plus API.
 ## Error handling
 
 - Demux-unsupported codec/container → message + raw file download link.
-- WebTorrent stall (20 s without useful peers/pieces) → automatic fallback to
-  backend source, status bar shows the switch.
+- Torrent has no peers / stalls (60 s without progress) → status bar shows
+  "waiting for peers"; user can cancel or keep waiting.
 - OPFS quota exceeded → play without caching, note in status bar.
 - Backend unreachable while a magnet was started there → retry with backoff,
   then error card.

@@ -70,14 +70,16 @@ function showFileLinks(info) {
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
+  const row = el('div', { class: 'downloads' });
   for (const f of info.files ?? []) {
     const name = String(f.path ?? `file-${f.index}`).split('/').pop();
     const mb = Math.round((f.size ?? 0) / 1048576);
-    host.appendChild(el('a', {
+    row.appendChild(el('a', {
       href: `/api/magnets/${info.id}/files/${f.index}`,
       download: name,
     }, `⬇ ${name} (${mb} MB)`));
   }
+  host.appendChild(row);
 }
 
 function failWithFiles(e) {

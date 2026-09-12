@@ -1,6 +1,10 @@
 package torrents
 
 import (
+	"bytes"
+	"errors"
+	"fmt"
+	"io"
 	"sync"
 	"testing"
 	"time"
@@ -12,12 +16,24 @@ type fakeTorrent struct {
 	gotInfo chan struct{}
 	files   []FileInfo
 	name    string
+	data    []byte
 }
 
 func (f *fakeTorrent) GotInfo() <-chan struct{} { return f.gotInfo }
 func (f *fakeTorrent) Files() []FileInfo        { return f.files }
 func (f *fakeTorrent) Name() string             { return f.name }
 func (f *fakeTorrent) Drop()                    {}
+
+type nopSeekCloser struct{ io.ReadSeeker }
+
+func (nopSeekCloser) Close() error { return nil }
+
+func (f *fakeTorrent) FileReader(index int) (io.ReadSeekCloser, int64, error) {
+	if index < 0 || index >= len(f.files) {
+		return nil, 0, fmt.Errorf("%w: bad file index %d", ErrNotFound, index)
+	}
+	return nopSeekCloser{bytes.NewReader(f.data)}, f.files[index].Size, nil
+}
 
 type fakeClient struct {
 	mu       sync.Mutex
@@ -124,5 +140,25 @@ func TestAddBadMagnet(t *testing.T) {
 	defer m.Close()
 	if _, err := m.Add("not-a-magnet"); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+func TestFileReaderUnknownMagnet(t *testing.T) {
+	m := NewManagerWithClient(newFakeClient(), t.TempDir())
+	defer m.Close()
+	if _, _, err := m.FileReader("deadbeef", 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+func TestFileReaderBadIndex(t *testing.T) {
+	m := NewManagerWithClient(newFakeClient(), t.TempDir())
+	defer m.Close()
+	id, err := m.Add(testMagnet)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, _, err := m.FileReader(id, 99); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }

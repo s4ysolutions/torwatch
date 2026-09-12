@@ -1,11 +1,16 @@
 package torrents
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 
 	"github.com/anacrolix/torrent"
 )
+
+// ErrNotFound is returned when a magnet id (or file index) is unknown.
+var ErrNotFound = errors.New("torrents: not found")
 
 // MagnetInfo is the JSON state for one magnet.
 type MagnetInfo struct {
@@ -29,6 +34,7 @@ type torrentIface interface {
 	Files() []FileInfo
 	Name() string
 	Drop()
+	FileReader(index int) (io.ReadSeekCloser, int64, error)
 }
 
 // clientIface mirrors the *torrent.Client methods Manager uses.
@@ -49,6 +55,18 @@ func (r *realTorrent) Files() []FileInfo {
 		out[i] = FileInfo{Index: i, Path: f.Path(), Size: f.Length()}
 	}
 	return out
+}
+
+// FileReader opens a seekable reader for file index. The anacrolix Reader
+// prioritizes pieces near the read offset, so playback never waits for the
+// full file.
+func (r *realTorrent) FileReader(index int) (io.ReadSeekCloser, int64, error) {
+	files := r.t.Files()
+	if index < 0 || index >= len(files) {
+		return nil, 0, fmt.Errorf("%w: bad file index %d", ErrNotFound, index)
+	}
+	f := files[index]
+	return f.NewReader(), f.Length(), nil
 }
 
 type realClient struct{ c *torrent.Client }
@@ -131,13 +149,25 @@ func (m *Manager) Info(id string) (MagnetInfo, error) {
 	defer m.mu.Unlock()
 	e, ok := m.byID[id]
 	if !ok {
-		return MagnetInfo{}, fmt.Errorf("unknown magnet %q", id)
+		return MagnetInfo{}, fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
 	}
 	files := append([]FileInfo(nil), e.files...)
 	if files == nil {
 		files = []FileInfo{}
 	}
 	return MagnetInfo{ID: id, Name: e.name, State: e.state, Files: files}, nil
+}
+
+// FileReader returns a seekable reader for file index of id.
+// Thin lookup + NewReader so Task 4 can add a lastUsed touch here.
+func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, error) {
+	m.mu.Lock()
+	e, ok := m.byID[id]
+	m.mu.Unlock()
+	if !ok {
+		return nil, 0, fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
+	}
+	return e.t.FileReader(index)
 }
 
 // Remove drops id from the client.

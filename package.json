@@ -1,1 +1,1 @@
-{"type": "module", "scripts": {"test": "node --test \"static/demux/*.test.js\" \"static/util/*.test.js\" \"static/adapters/*.test.js\" \"static/usecases/*.test.js\" \"static/player/*.test.js\""}}
+{"type": "module", "scripts": {"test": "node --test \"static/demux/*.test.js\" \"static/util/*.test.js\" \"static/adapters/*.test.js\" \"static/usecases/*.test.js\" \"static/player/*.test.js\" \"static/views/*.test.js\""}}

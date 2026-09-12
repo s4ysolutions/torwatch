@@ -22,7 +22,7 @@ function memLocalStorage() {
 
 function reset() {
   globalThis.localStorage = memLocalStorage();
-  playerState.set({ phase: 'idle', magnetId: null, fileIndex: 0, position: 0, duration: 0, error: null });
+  playerState.set({ phase: 'idle', magnetId: null, fileIndex: 0, position: 0, duration: 0, error: null, note: null });
   tracks.set({ audio: [], subtitles: [], activeAudio: null, activeSubtitle: null });
 }
 
@@ -198,4 +198,41 @@ test('switchAudio delegates to player and syncs tracks', async () => {
   await switchAudio({ player, trackNumber: 2 });
   assert.equal(got, 2);
   assert.equal(tracks.get().activeAudio, 2);
+});
+
+// --- C4 watchdog (Task 16) ---
+
+test('loadMagnet signals waiting after watchdogMs but keeps polling to ready', async () => {
+  reset();
+  const phases = [];
+  const off = playerState.subscribe((s) => phases.push(s.phase));
+  try {
+    let gets = 0;
+    const fake = backendAdapter(async (url) => {
+      if (url.endsWith('/api/magnets')) return Response.json({ id: 'w' });
+      gets++;
+      if (gets < 12) return Response.json({ id: 'w', state: 'fetching-meta', files: [] });
+      return Response.json({ id: 'w', state: 'ready', files: [{ index: 0, path: 'film.mp4', size: 10 }] });
+    });
+    const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?stall', pollMs: 5, watchdogMs: 20 });
+    assert.deepEqual(r, { id: 'w', fileIndex: 0 });
+    assert.ok(phases.includes('waiting'), `expected a waiting phase, got ${JSON.stringify(phases)}`);
+    assert.equal(playerState.get().phase, 'ready');
+  } finally {
+    off();
+  }
+});
+
+test('loadMagnet treats missing state as not-ready (only ready breaks poll)', async () => {
+  reset();
+  let gets = 0;
+  const fake = backendAdapter(async (url) => {
+    if (url.endsWith('/api/magnets')) return Response.json({ id: 'ns' });
+    gets++;
+    if (gets < 3) return Response.json({ id: 'ns', files: [] }); // no state
+    return Response.json({ id: 'ns', state: 'ready', files: [{ index: 0, path: 'film.mp4', size: 10 }] });
+  });
+  const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?nostate', pollMs: 1 });
+  assert.deepEqual(r, { id: 'ns', fileIndex: 0 });
+  assert.equal(gets, 3);
 });

@@ -85,3 +85,20 @@ test('statusBar shows phase text and busy class', () => {
     restore();
   }
 });
+
+test('statusBar shows waiting-for-peers busy state (Task 16 watchdog)', () => {
+  const restore = installStub();
+  try {
+    const state = emitter({ phase: 'idle' });
+    const c = globalThis.document.createElement('div');
+    const dispose = render(c, state);
+    const bar = c.children[0];
+    state.set({ phase: 'waiting' });
+    assert.match(bar.textContent, /waiting for peers/i);
+    assert.ok(bar.classList.contains('busy'));
+    assert.notEqual(bar.style.display, 'none');
+    dispose();
+  } finally {
+    restore();
+  }
+});

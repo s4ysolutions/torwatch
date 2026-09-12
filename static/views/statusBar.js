@@ -6,13 +6,14 @@
 // without a container and returns it (caller appends; node.dispose() to unbind).
 
 function isBusy(phase) {
-  return phase === 'fetching' || phase === 'loading' || String(phase ?? '').startsWith('fetching');
+  return phase === 'fetching' || phase === 'loading' || phase === 'waiting' || String(phase ?? '').startsWith('fetching');
 }
 
 function textFor(s) {
   if (!s) return '';
   if (s.phase === 'error') return s.error || 'Error';
   if (s.phase === 'idle') return '';
+  if (s.phase === 'waiting') return 'Waiting for peers…';
   if (isBusy(s.phase)) return 'Fetching torrent…';
   if (s.phase === 'ready') return 'Ready';
   if (s.phase === 'playing') return '';

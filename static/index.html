@@ -1,1 +1,70 @@
-torwatch
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>torwatch</title>
+<style>
+:root{--ink:#1c1712;--muted:#6f6459;--line:#e3dccf;--wash:#f6f2e9;--red:#bc3a21;--red-d:#962d18;
+--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--ink);background:#fff;
+max-width:780px;margin:0 auto;padding:2.5rem 1.25rem 4rem;line-height:1.55}
+h1{font-family:Georgia,"Times New Roman",serif;font-size:2.1rem;line-height:1.15;margin:0 0 .4rem;letter-spacing:-.01em}
+.lede{font-size:1.06rem;color:var(--muted);max-width:62ch;margin:0 0 1.5rem}
+.lede b{color:var(--ink)}
+.card{background:var(--wash);border:1px solid var(--line);border-radius:12px;padding:1.1rem 1.2rem 1.25rem}
+label{display:block;font-size:.82rem;font-weight:650;margin:.75rem 0 .2rem}
+label:first-child{margin-top:0}
+input[type=text],input[type=password]{width:100%;font-size:1rem;padding:.55rem .7rem;color:var(--ink);
+background:#fff;border:1px solid #cfc6b4;border-radius:6px}
+input[type=text]:focus,input[type=password]:focus{outline:2px solid var(--red);outline-offset:1px;border-color:var(--red)}
+input[type=file]{font-size:.92rem;margin:.25rem 0}
+#go{display:block;width:100%;margin:1.1rem 0 0;padding:.7rem;font-size:1.02rem;font-weight:650;
+color:#fff;background:var(--ink);border:0;border-radius:8px;cursor:pointer}
+#go:hover{background:var(--red)}
+#go:active{background:var(--red-d)}
+#status{display:none;position:relative;overflow:hidden;margin-top:1rem;padding:.8rem .95rem;
+background:var(--ink);color:#f2ece1;border-radius:10px;font-family:var(--mono);font-size:.86rem}
+#status.busy::after{content:"";position:absolute;left:0;bottom:0;height:3px;width:40%;
+background:var(--red);animation:slide 1.1s linear infinite}
+@keyframes slide{from{transform:translateX(-100%)}to{transform:translateX(350%)}}
+@media (prefers-reduced-motion:reduce){#status.busy::after{animation:none;width:100%}}
+#stage{display:none;position:relative;width:640px;max-width:100%;margin-top:1.25rem;
+border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#000}
+video{width:100%;height:auto;display:block;background:#000}
+#grip{position:absolute;right:8px;bottom:8px;width:22px;height:22px;cursor:nwse-resize;touch-action:none;
+background:linear-gradient(135deg,transparent 50%,#f2ece1 50%,#f2ece1 55%,transparent 55%,transparent 65%,#f2ece1 65%,#f2ece1 70%,transparent 70%);
+background-color:rgba(20,14,10,.55);border-radius:5px}
+.dl{margin-top:1.1rem}
+.dl a{display:inline-block;margin:0 .6rem .5rem 0;padding:.6rem 1.05rem;border-radius:8px;
+text-decoration:none;font-weight:650;font-size:.95rem;border:1px solid var(--ink);color:var(--ink)}
+.dl a:first-child{background:var(--red);border-color:var(--red);color:#fff}
+.dl a:first-child:hover{background:var(--red-d)}
+.dl a:not(:first-child):hover{background:var(--wash)}
+@media (prefers-color-scheme:dark){
+:root{--ink:#ece3d3;--muted:#a89a87;--line:#3a3128;--wash:#211b14}
+body{background:#161210}
+input[type=text],input[type=password]{background:#221c15;border-color:#4a4034;color:var(--ink)}
+#go{background:#ece3d3;color:#161210}
+#go:hover{background:var(--red);color:#fff}
+.dl a:not(:first-child):hover{background:#221c15}
+}
+</style>
+<link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+<h1>torwatch</h1>
+<p class="lede">Paste a <b>magnet link</b> or upload a <b>.torrent file</b>. The server fetches
+the torrent, and you can <b>watch it right here</b> — with audio-track switching,
+subtitles, and download links.</p>
+
+<div id="card"></div>
+<div id="status"></div>
+<div id="stage"></div>
+<div id="subs"></div>
+<div id="dl"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

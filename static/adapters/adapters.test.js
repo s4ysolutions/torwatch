@@ -71,6 +71,25 @@ test('fetchRange throws on error status', async () => {
   await assert.rejects(() => a.fetchRange('id1', 0, 0, 9));
 });
 
+test('json error with plain-text body reports status, not SyntaxError', async () => {
+  const fakeFetch = async () => new Response('not found', { status: 404 });
+  const a = backendAdapter(fakeFetch);
+  await assert.rejects(() => a.getMagnet('missing'), /404/);
+});
+
+test('addTorrentFile POSTs bytes and returns id', async () => {
+  let seen;
+  const fakeFetch = async (url, opts) => {
+    seen = { url, opts };
+    return Response.json({ id: 't1' });
+  };
+  const a = backendAdapter(fakeFetch);
+  const out = await a.addTorrentFile(new Uint8Array([1, 2, 3]));
+  assert.deepEqual(out, { id: 't1' });
+  assert.equal(seen.url, '/api/torrents');
+  assert.equal(seen.opts.method, 'POST');
+});
+
 // --- opfsAdapter (memory fallback) ---
 
 test('opfs memory fallback round-trip', async () => {

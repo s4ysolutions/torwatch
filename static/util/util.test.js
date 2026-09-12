@@ -45,7 +45,7 @@ test('route parses play hash', () => {
 
 test('playerState initial shape', () => {
   assert.deepEqual(playerState.get(), {
-    phase: 'idle', magnetId: null, fileIndex: 0, position: 0, duration: 0, error: null,
+    phase: 'idle', magnetId: null, fileIndex: 0, position: 0, duration: 0, error: null, note: null,
   });
 });
 

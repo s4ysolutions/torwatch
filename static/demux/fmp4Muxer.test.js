@@ -203,3 +203,27 @@ test('codecString for fixture tracks', async () => {
     assert.equal(codecString(a), 'mp4a.40.2');
   }
 });
+
+test('codecString for synthetic HEVC track (big-endian compat, full constraints)', () => {
+  // hvcC: version(1) | profile_space/tier/idc | compat[4] | constraints[6] | level | ...
+  const hvcC = new Uint8Array([
+    0x01, 0x01, // version, profile_space=0 tier=L profile_idc=1
+    0x12, 0x34, 0x56, 0x78, // general_profile_compatibility_flags (big-endian)
+    0xb0, 0x00, 0x00, 0x00, 0x00, 0x00, // general_constraint_indicator_flags (6 bytes)
+    120, // general_level_idc
+    0xf0, 0x00, 0xfc, 0xfd, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b,
+  ]);
+  const track = { type: 'video', codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: hvcC, language: 'und' };
+  assert.equal(codecString(track), 'hev1.1.12345678.L120.b00000000000');
+});
+
+test('MP3 track: codecString and 44100 mdhd timescale', () => {
+  const track = { type: 'audio', codecId: 'A_MPEG/L3', codecPrivate: new Uint8Array(0), language: 'und' };
+  assert.equal(codecString(track), 'mp4a.69');
+  const init = initSegment(track);
+  assert.ok(containsBox(init, 'mp4a'));
+  const mdhd = findBox(init, 'mdhd');
+  assert.ok(mdhd);
+  // mdhd v0: size(4) type(4) v/f(4) ctime(4) mtime(4) timescale(4)
+  assert.equal(new DataView(mdhd.buffer, mdhd.byteOffset, mdhd.length).getUint32(20), 44100);
+});

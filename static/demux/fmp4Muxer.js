@@ -82,6 +82,9 @@ function timescaleFor(track) {
   if (track.type === 'audio') {
     if (track.codecId === 'A_AAC') return parseASC(track.codecPrivate).rate;
     if (track.codecId === 'A_OPUS') return 48000;
+    // MP3 in MKV carries no sample rate/channel count: assume 44100/stereo
+    // (matches the stsd entry below) until real MP3 fixtures exist.
+    if (track.codecId === 'A_MPEG/L3') return 44100;
   }
   return 90000;
 }
@@ -101,9 +104,10 @@ export function codecString(track) {
       const p = track.codecPrivate;
       if (p.length < 13) throw new Error('HEVC track missing hvcC');
       const idc = p[1] & 31;
-      const compat = ((p[5] << 24) | (p[4] << 16) | (p[3] << 8) | p[2]) >>> 0;
+      const compat = ((p[2] << 24) | (p[3] << 16) | (p[4] << 8) | p[5]) >>> 0;
       const tier = (p[1] & 32) ? 'H' : 'L';
-      return `hev1.${idc}.${compat.toString(16).toLowerCase()}.${tier}L${p[12]}.${hex(p[6])}`;
+      const constraints = [...p.slice(6, 12)].map(b => hex(b)).join('');
+      return `hev1.${idc}.${compat.toString(16).toLowerCase()}.${tier}${p[12]}.${constraints}`;
     }
     case 'A_AAC':
       return `mp4a.40.${parseASC(track.codecPrivate).aot}`;

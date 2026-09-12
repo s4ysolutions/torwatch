@@ -1,0 +1,18 @@
+[Unit]
+Description=torwatch daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=torwatch
+Group=torwatch
+NoNewPrivileges=true
+AmbientCapabilities=
+ExecStart=/opt/torwatch/torwatchd -addr :8080 -static /opt/torwatch/static -data /var/lib/torwatch -ttl 24h -max-disk 20GB
+WorkingDirectory=/opt/torwatch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

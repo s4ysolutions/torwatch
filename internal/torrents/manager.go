@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
+	"time"
 
 	"github.com/anacrolix/torrent"
 )
@@ -82,10 +83,11 @@ func (r *realClient) AddMagnet(uri string) (torrentIface, error) {
 func (r *realClient) Close() { r.c.Close() }
 
 type entry struct {
-	t     torrentIface
-	state string
-	files []FileInfo
-	name  string
+	t        torrentIface
+	state    string
+	files    []FileInfo
+	name     string
+	lastUsed time.Time
 }
 
 // Manager tracks magnets by infohash hex. Add is idempotent on infohash.
@@ -94,11 +96,12 @@ type Manager struct {
 	client  clientIface
 	byID    map[string]*entry
 	dataDir string
+	dirSize func(string) (int64, error)
 }
 
 // NewManagerWithClient builds a Manager over c (tests inject a fake).
 func NewManagerWithClient(c clientIface, dataDir string) *Manager {
-	return &Manager{client: c, byID: make(map[string]*entry), dataDir: dataDir}
+	return &Manager{client: c, byID: make(map[string]*entry), dataDir: dataDir, dirSize: dirSizeWalk}
 }
 
 // NewManager builds a Manager over a real anacrolix client.
@@ -120,7 +123,8 @@ func (m *Manager) Add(magnet string) (string, error) {
 	}
 	id := spec.InfoHash.HexString()
 	m.mu.Lock()
-	if _, ok := m.byID[id]; ok {
+	if e, ok := m.byID[id]; ok {
+		e.lastUsed = time.Now()
 		m.mu.Unlock()
 		return id, nil
 	}
@@ -129,7 +133,7 @@ func (m *Manager) Add(magnet string) (string, error) {
 		m.mu.Unlock()
 		return "", err
 	}
-	e := &entry{t: t, state: "fetching-meta"}
+	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
 	m.byID[id] = e
 	m.mu.Unlock()
 	go func() {
@@ -159,10 +163,13 @@ func (m *Manager) Info(id string) (MagnetInfo, error) {
 }
 
 // FileReader returns a seekable reader for file index of id.
-// Thin lookup + NewReader so Task 4 can add a lastUsed touch here.
+// Touches lastUsed so retention treats playback as use.
 func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, error) {
 	m.mu.Lock()
 	e, ok := m.byID[id]
+	if ok {
+		e.lastUsed = time.Now()
+	}
 	m.mu.Unlock()
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
@@ -174,10 +181,7 @@ func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, er
 func (m *Manager) Remove(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e, ok := m.byID[id]; ok {
-		e.t.Drop()
-		delete(m.byID, id)
-	}
+	m.removeLocked(id)
 }
 
 // Close stops the underlying client.

@@ -59,10 +59,20 @@ func newServer(staticDir string, m fileManager, opts Opts) *Server {
 	mux.HandleFunc("GET /api/opensubs", s.handleOpensubs)
 	if m != nil {
 		mux.HandleFunc("POST /api/magnets", func(w http.ResponseWriter, r *http.Request) {
+			const maxMagnetBody = 4 << 10 // 4 KB, like the torrent-upload path
+			body, err := io.ReadAll(io.LimitReader(r.Body, maxMagnetBody+1))
+			if err != nil || len(body) == 0 {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if len(body) > maxMagnetBody {
+				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			var req struct {
 				Magnet string `json:"magnet"`
 			}
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Magnet == "" {
+			if err := json.Unmarshal(body, &req); err != nil || req.Magnet == "" {
 				http.Error(w, "bad request", http.StatusBadRequest)
 				return
 			}

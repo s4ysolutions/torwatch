@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -46,26 +47,71 @@ func (m *Manager) setLastUsed(id string, t time.Time) {
 	}
 }
 
-// removeLocked drops id from the client and deletes its real storage path.
-// anacrolix lays out bytes under dataDir/<torrent name>, not dataDir/<id>,
-// so evict by the handle's Name() (captured before Drop); the legacy id
-// path goes too. Best-effort: missing paths are fine (RemoveAll).
-// Caller must hold m.mu.
-func (m *Manager) removeLocked(id string) {
+// safeJoin resolves name under dataDir, rejecting anything that could
+// escape it (empty, ".", "..", absolute paths, or names containing path
+// separators — torrent metadata is attacker-controlled). ok=false means the
+// caller must fall back to the id-only path and touch nothing else.
+func safeJoin(dataDir, name string) (string, bool) {
+	if name == "" || name == "." || name == ".." {
+		return "", false
+	}
+	if filepath.IsAbs(name) {
+		return "", false
+	}
+	if strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\') {
+		return "", false
+	}
+	if name != filepath.Clean(name) {
+		return "", false
+	}
+	base := filepath.Clean(dataDir)
+	p := filepath.Join(base, name)
+	// Defense in depth: verify containment after Join+Clean.
+	if p == base || !strings.HasPrefix(p, base+string(os.PathSeparator)) {
+		return "", false
+	}
+	return p, true
+}
+
+// storagePaths returns the on-disk paths owned by id: the sanitized name
+// dir (when safe) plus the legacy id dir (infohash hex — always safe).
+func storagePaths(dataDir, id, name string) []string {
+	paths := []string{filepath.Join(filepath.Clean(dataDir), id)}
+	if p, ok := safeJoin(dataDir, name); ok && name != id {
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+// planRemoveLocked drops id from the map and returns the client handle plus
+// owned storage paths. Caller must hold m.mu. All client/fs I/O happens
+// after unlock (see evict / RunCleanup).
+func (m *Manager) planRemoveLocked(id string) (torrentIface, []string, bool) {
 	e, ok := m.byID[id]
 	if !ok {
-		return
+		return nil, nil, false
 	}
 	name := e.t.Name()
 	if name == "" {
 		name = e.name
 	}
-	e.t.Drop()
 	delete(m.byID, id)
-	if name != "" && name != id {
-		_ = os.RemoveAll(filepath.Join(m.dataDir, name))
+	return e.t, storagePaths(m.dataDir, id, name), true
+}
+
+// evict removes id without holding m.mu across client/fs I/O.
+func (m *Manager) evict(id string) bool {
+	m.mu.Lock()
+	t, paths, ok := m.planRemoveLocked(id)
+	m.mu.Unlock()
+	if !ok {
+		return false
 	}
-	_ = os.RemoveAll(filepath.Join(m.dataDir, id))
+	t.Drop()
+	for _, p := range paths {
+		_ = os.RemoveAll(p)
+	}
+	return true
 }
 
 // oldestLastUsedLocked returns the id with the stalest lastUsed.
@@ -85,29 +131,64 @@ func (m *Manager) oldestLastUsedLocked() string {
 // RunCleanup evicts expired entries (lastUsed older than ttl), then
 // least-recently-used entries until dataDir fits maxDisk. One pass,
 // exported for tests. Returns removed ids (TTL batch first, then LRU).
+// Locking: entries are unlinked from the map under m.mu, but client Drop
+// and RemoveAll run outside it; each disk-budget eviction re-plans under
+// the lock (double-checked — a concurrent Remove may have won the race).
 func (m *Manager) RunCleanup(now func() time.Time, ttl time.Duration, maxDisk int64) []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var removed []string
 	t := now()
-	// 1. TTL expiry.
+	// 1. TTL expiry: unlink under lock, I/O outside it.
+	m.mu.Lock()
+	var expired []string
 	for id, e := range m.byID {
 		if t.Sub(e.lastUsed) > ttl {
-			m.removeLocked(id)
-			removed = append(removed, id)
+			expired = append(expired, id)
 		}
+	}
+	type doomed struct {
+		t     torrentIface
+		paths []string
+		id    string
+	}
+	jobs := make([]doomed, 0, len(expired))
+	for _, id := range expired {
+		if dt, paths, ok := m.planRemoveLocked(id); ok {
+			jobs = append(jobs, doomed{dt, paths, id})
+		}
+	}
+	dirSize := m.dirSize
+	dataDir := m.dataDir
+	m.mu.Unlock()
+	var removed []string
+	for _, j := range jobs {
+		j.t.Drop()
+		for _, p := range j.paths {
+			_ = os.RemoveAll(p)
+		}
+		removed = append(removed, j.id)
 	}
 	// 2. Disk budget, LRU first. Re-measure after each eviction so
 	// real deletes shrink the total; tests inject dirSize.
-	size, _ := m.dirSize(m.dataDir)
-	for size > maxDisk && len(m.byID) > 0 {
-		oldest := m.oldestLastUsedLocked()
-		if oldest == "" {
+	for {
+		size, _ := dirSize(dataDir)
+		if size <= maxDisk {
 			break
 		}
-		m.removeLocked(oldest)
+		m.mu.Lock()
+		if len(m.byID) == 0 {
+			m.mu.Unlock()
+			break
+		}
+		oldest := m.oldestLastUsedLocked()
+		dt, paths, ok := m.planRemoveLocked(oldest)
+		m.mu.Unlock()
+		if !ok {
+			break
+		}
+		dt.Drop()
+		for _, p := range paths {
+			_ = os.RemoveAll(p)
+		}
 		removed = append(removed, oldest)
-		size, _ = m.dirSize(m.dataDir)
 	}
 	return removed
 }

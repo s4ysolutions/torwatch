@@ -105,6 +105,66 @@ func TestFileReaderTouchesLastUsed(t *testing.T) {
 	}
 }
 
+// TestCleanupRejectsHostileNames: torrent metadata names are
+// attacker-controlled; eviction must never RemoveAll outside dataDir, even
+// for names like "../../evil" or absolute paths. Only the legacy id dir
+// goes; a sentinel file outside dataDir must survive.
+func TestCleanupRejectsHostileNames(t *testing.T) {
+	now := time.Now()
+	parent := t.TempDir()
+	dataDir := filepath.Join(parent, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	magnets := []string{testMagnetA, testMagnetB}
+	hostiles := []string{
+		"../../evil",
+		filepath.Join(parent, "abs-evil"), // absolute path outside dataDir
+		"..\\evil",
+		"..",
+		".",
+		"",
+	}
+	// Sentinel files that must survive every subtest.
+	sentinels := map[string]string{
+		"../../evil":                      filepath.Join(parent, "evil"),
+		"..\\evil":                        filepath.Join(parent, "evil"),
+		"..":                              filepath.Join(parent, "evil"),
+		".":                               filepath.Join(parent, "evil"),
+		"":                                filepath.Join(parent, "evil"),
+		filepath.Join(parent, "abs-evil"): filepath.Join(parent, "abs-evil"),
+	}
+	for i, hostile := range hostiles {
+		fc := newFakeClient()
+		fc.name = hostile
+		m := NewManagerWithClient(fc, dataDir)
+		t.Cleanup(m.Close)
+		id, err := m.Add(magnets[i%len(magnets)])
+		if err != nil {
+			t.Fatalf("Add %q: %v", hostile, err)
+		}
+		sentinel := sentinels[hostile]
+		if err := os.WriteFile(sentinel, []byte("sentinel"), 0o644); err != nil {
+			t.Fatalf("write sentinel: %v", err)
+		}
+		legacyPath := filepath.Join(dataDir, id)
+		if err := os.MkdirAll(legacyPath, 0o755); err != nil {
+			t.Fatalf("mkdir legacy path: %v", err)
+		}
+		m.setLastUsed(id, now.Add(-25*time.Hour))
+		removed := m.RunCleanup(func() time.Time { return now }, 24*time.Hour, 1<<62)
+		if len(removed) != 1 || removed[0] != id {
+			t.Fatalf("hostile %q: removed %v", hostile, removed)
+		}
+		if b, err := os.ReadFile(sentinel); err != nil || string(b) != "sentinel" {
+			t.Fatalf("hostile %q: sentinel touched (err %v)", hostile, err)
+		}
+		if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+			t.Fatalf("hostile %q: legacy id path not evicted (err %v)", hostile, err)
+		}
+	}
+}
+
 // TestCleanupRemovesRealStoragePath covers the anacrolix layout: bytes live
 // under dataDir/<torrent name>, not dataDir/<infohash>. Eviction must delete
 // the name path (and the legacy id path) with the real dirSizeWalk.

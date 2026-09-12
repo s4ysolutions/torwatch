@@ -127,6 +127,9 @@ func NewManager(dataDir string) (*Manager, error) {
 }
 
 // Add parses magnet, returns infohash hex. Same magnet twice → same id.
+// The client call runs outside m.mu; the map is re-checked after
+// (double-checked) so a concurrent Add for the same id wins once and the
+// duplicate handle is dropped.
 func (m *Manager) Add(magnet string) (string, error) {
 	spec, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
@@ -139,10 +142,17 @@ func (m *Manager) Add(magnet string) (string, error) {
 		m.mu.Unlock()
 		return id, nil
 	}
+	m.mu.Unlock()
 	t, err := m.client.AddMagnet(magnet)
 	if err != nil {
-		m.mu.Unlock()
 		return "", err
+	}
+	m.mu.Lock()
+	if e, ok := m.byID[id]; ok {
+		e.lastUsed = time.Now()
+		m.mu.Unlock()
+		t.Drop() // duplicate handle; keep the registered one
+		return id, nil
 	}
 	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
 	m.byID[id] = e
@@ -151,6 +161,9 @@ func (m *Manager) Add(magnet string) (string, error) {
 		<-t.GotInfo()
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if cur, ok := m.byID[id]; !ok || cur != e {
+			return // evicted (or replaced) while fetching meta
+		}
 		e.state = "ready"
 		e.files = t.Files()
 		e.name = t.Name()
@@ -172,10 +185,18 @@ func (m *Manager) AddTorrentFile(data []byte) (string, error) {
 		m.mu.Unlock()
 		return id, nil
 	}
+	m.mu.Unlock()
+	// Client I/O outside the lock; re-check after (double-checked).
 	t, err := m.client.AddTorrent(mi)
 	if err != nil {
-		m.mu.Unlock()
 		return "", err
+	}
+	m.mu.Lock()
+	if e, ok := m.byID[id]; ok {
+		e.lastUsed = time.Now()
+		m.mu.Unlock()
+		t.Drop() // duplicate handle; keep the registered one
+		return id, nil
 	}
 	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
 	m.byID[id] = e
@@ -184,6 +205,9 @@ func (m *Manager) AddTorrentFile(data []byte) (string, error) {
 		<-t.GotInfo()
 		m.mu.Lock()
 		defer m.mu.Unlock()
+		if cur, ok := m.byID[id]; !ok || cur != e {
+			return // evicted (or replaced) while fetching meta
+		}
 		e.state = "ready"
 		e.files = t.Files()
 		e.name = t.Name()
@@ -222,17 +246,19 @@ func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, er
 }
 
 // Remove drops id from the client. Unknown id → ErrNotFound.
+// Client Drop and fs deletes run outside the lock (see evict).
 func (m *Manager) Remove(id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.byID[id]; !ok {
+	if !m.evict(id) {
 		return fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
 	}
-	m.removeLocked(id)
 	return nil
 }
 
-// Close stops the underlying client.
+// Close stops the underlying client. Safe on a nil client (tests) or nil
+// receiver.
 func (m *Manager) Close() {
+	if m == nil || m.client == nil {
+		return
+	}
 	m.client.Close()
 }

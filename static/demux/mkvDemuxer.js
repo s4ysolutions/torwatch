@@ -51,8 +51,8 @@ function strOf(bytes) {
 }
 
 export class MkvDemuxer {
-  constructor(fetchRange) {
-    this.stream = new ByteStream(fetchRange);
+  constructor(fetchRange, opts = {}) {
+    this.stream = new ByteStream(fetchRange, opts.chunkSize, opts.maxBytes);
     this.tracks = null;
     this.timecodeScale = 1_000_000;
     this.infoDuration = 0;
@@ -62,7 +62,9 @@ export class MkvDemuxer {
   }
 
   hdrAt(off) {
-    return readElementHeader(this.stream.buf, off);
+    // off is absolute; the stream holds a sliding window — re-derive the
+    // relative index at every call (never cache across awaits).
+    return readElementHeader(this.stream.buf, off - this.stream.winStart);
   }
 
   async readHeader() {
@@ -127,23 +129,28 @@ export class MkvDemuxer {
   }
 
   parseInfo(pay, end) {
+    // Sync: no awaits inside, so one buf/winStart snapshot is safe.
+    // pay/end are absolute; index the window relatively.
     const buf = this.stream.buf;
+    const ws = this.stream.winStart;
     let p = pay;
     while (p < end) {
-      const h = readElementHeader(buf, p);
+      const h = readElementHeader(buf, p - ws);
       const v = p + h.headerSize;
-      if (h.id === ID_TIMESTAMP_SCALE) this.timecodeScale = uintOf(buf.slice(v, v + h.size));
-      else if (h.id === ID_DURATION) this.infoDuration = floatOf(buf.slice(v, v + h.size));
+      const rel = v - ws;
+      if (h.id === ID_TIMESTAMP_SCALE) this.timecodeScale = uintOf(buf.slice(rel, rel + h.size));
+      else if (h.id === ID_DURATION) this.infoDuration = floatOf(buf.slice(rel, rel + h.size));
       p = v + h.size;
     }
   }
 
   parseTracks(pay, end) {
     const buf = this.stream.buf;
+    const ws = this.stream.winStart;
     const tracks = [];
     let p = pay;
     while (p < end) {
-      const h = readElementHeader(buf, p);
+      const h = readElementHeader(buf, p - ws);
       const v = p + h.headerSize;
       if (h.id === ID_TRACK_ENTRY) tracks.push(this.parseEntry(v, v + h.size));
       p = v + h.size;
@@ -153,12 +160,14 @@ export class MkvDemuxer {
 
   parseEntry(pay, end) {
     const buf = this.stream.buf;
+    const ws = this.stream.winStart;
     const t = { number: 0, type: null, codecId: '', codecPrivate: new Uint8Array(0), language: 'eng', name: '' };
     let p = pay;
     while (p < end) {
-      const h = readElementHeader(buf, p);
+      const h = readElementHeader(buf, p - ws);
       const v = p + h.headerSize;
-      const body = buf.slice(v, v + h.size);
+      const rel = v - ws;
+      const body = buf.slice(rel, rel + h.size); // fresh copy
       if (h.id === ID_TRACK_NUMBER) t.number = uintOf(body);
       else if (h.id === ID_TRACK_TYPE) t.type = TRACK_TYPE[uintOf(body)] ?? null;
       else if (h.id === ID_CODEC_ID) t.codecId = strOf(body);
@@ -174,20 +183,24 @@ export class MkvDemuxer {
     return (this.infoDuration * this.timecodeScale) / 1e9;
   }
 
-  // Split laced block payload into frames. dataOff is offset of first byte
-  // after flags in stream.buf, dataEnd is payload end.
+  // Split laced block payload into frames. dataOff is the absolute offset
+  // of the first byte after flags, dataEnd the absolute payload end.
+  // Returns fresh copies. Sync: one window snapshot is safe.
   splitFrames(lacing, dataOff, dataEnd) {
     const buf = this.stream.buf;
-    if (lacing === 0) return [buf.slice(dataOff, dataEnd)];
+    const ws = this.stream.winStart;
+    const rel = (abs) => abs - ws;
+    if (lacing === 0) return [buf.slice(rel(dataOff), rel(dataEnd))];
     if (lacing === 1) {
       // Xiph lacing: count byte, then frameCount-1 sizes.
-      let p = dataOff;
+      let p = rel(dataOff);
+      const dataRelEnd = rel(dataEnd);
       const frames = buf[p++] + 1;
       const sizes = [];
       for (let i = 0; i < frames - 1; i++) {
         let s = 0;
         for (;;) {
-          if (p >= dataEnd) throw new Error('bad Xiph lacing');
+          if (p >= dataRelEnd) throw new Error('bad Xiph lacing');
           const b = buf[p++];
           s += b;
           if (b !== 255) break;
@@ -199,23 +212,25 @@ export class MkvDemuxer {
         out.push(buf.slice(p, p + sizes[i]));
         p += sizes[i];
       }
-      out.push(buf.slice(p, dataEnd));
+      out.push(buf.slice(p, dataRelEnd));
       return out;
     }
     throw new Error(`unsupported lacing mode ${lacing}`);
   }
 
   parseBlockPayload(pay, size, clusterTs) {
+    // Sync: snapshot the window once; pay/size are absolute.
     const buf = this.stream.buf;
-    const tn = readVint(buf, pay);
-    let p = pay + tn.size;
+    const ws = this.stream.winStart;
+    const tn = readVint(buf, pay - ws);
+    let p = pay - ws + tn.size;
     const rel = (buf[p] << 8) | buf[p + 1];
     const relS = (rel << 16) >> 16;
     const flags = buf[p + 2];
     p += 3;
     const lacing = (flags >> 1) & 3;
     const keyframe = !!(flags & 0x80);
-    const frames = this.splitFrames(lacing, p, pay + size);
+    const frames = this.splitFrames(lacing, p + ws, pay + size);
     const timestamp = ((clusterTs + relS) * this.timecodeScale) / 1e9;
     return { trackNumber: tn.value, timestamp, keyframe, frames };
   }
@@ -261,13 +276,15 @@ export class MkvDemuxer {
         return;
       }
       // NB: buffer must be re-read after every await — ensure() replaces
-      // the internal array when it grows, so no stale reference survives.
-      const h = readElementHeader(this.stream.buf, q);
+      // the internal array on grow/evict/reset (sliding window), so no
+      // stale reference or absolute index survives. hdrAt()/absSlice()
+      // re-derive window-relative positions on each call.
+      const h = this.hdrAt(q);
       const v = q + h.headerSize;
       const pend = h.size === -1 ? end : v + h.size;
       if (h.id === ID_TIMESTAMP) {
         await this.stream.ensure(v, h.size);
-        clusterTs = uintOf(this.stream.buf.slice(v, v + h.size));
+        clusterTs = uintOf(this.stream.absSlice(v, h.size));
       } else if (h.id === ID_SIMPLE_BLOCK) {
         await this.stream.ensure(v, h.size);
         const b = this.parseBlockPayload(v, h.size, clusterTs);
@@ -285,13 +302,16 @@ export class MkvDemuxer {
     }
   }
 
+  // Sync generator: runs to the next yield without interleaving awaits,
+  // so one window snapshot is safe. Yields fresh copies only.
   *walkBlockGroup(pay, end, clusterTs, want, fromSec, toSec) {
     const buf = this.stream.buf;
+    const ws = this.stream.winStart;
     let block = null;
     let hasRef = false;
     let q = pay;
     while (q < end) {
-      const h = readElementHeader(buf, q);
+      const h = readElementHeader(buf, q - ws);
       const v = q + h.headerSize;
       if (h.id === ID_BLOCK) block = this.parseBlockPayload(v, h.size, clusterTs);
       else if (h.id === ID_REFERENCE_BLOCK) hasRef = true;

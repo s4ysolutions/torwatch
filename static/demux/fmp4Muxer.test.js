@@ -217,6 +217,18 @@ test('codecString for synthetic HEVC track (big-endian compat, full constraints)
   assert.equal(codecString(track), 'hev1.1.12345678.L120.b00000000000');
 });
 
+test('codecString for synthetic HEVC track pads small compat to 8 hex digits', () => {
+  const hvcC = new Uint8Array([
+    0x01, 0x01,
+    0x00, 0x00, 0x00, 0x01, // compat = 1 → must render '00000001', not '1'
+    0xb0, 0x00, 0x00, 0x00, 0x00, 0x00,
+    120,
+    0xf0, 0x00, 0xfc, 0xfd, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b,
+  ]);
+  const track = { type: 'video', codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: hvcC, language: 'und' };
+  assert.equal(codecString(track), 'hev1.1.00000001.L120.b00000000000');
+});
+
 test('MP3 track: codecString and 44100 mdhd timescale', () => {
   const track = { type: 'audio', codecId: 'A_MPEG/L3', codecPrivate: new Uint8Array(0), language: 'und' };
   assert.equal(codecString(track), 'mp4a.69');

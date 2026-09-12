@@ -9,6 +9,12 @@ User=torwatch
 Group=torwatch
 NoNewPrivileges=true
 AmbientCapabilities=
+# Optional secrets (e.g. OPENSUBTITLES_API_KEY=...); missing file is OK.
+EnvironmentFile=-/etc/torwatch/env
+ProtectSystem=yes
+PrivateTmp=yes
+# Matches the build-arm64.sh staging tree copied to /opt/torwatch
+# (DESTDIR/torwatchd + DESTDIR/static — see deploy/INSTALL.md).
 ExecStart=/opt/torwatch/torwatchd -addr :8080 -static /opt/torwatch/static -data /var/lib/torwatch -ttl 24h -max-disk 20GB
 WorkingDirectory=/opt/torwatch
 Restart=on-failure

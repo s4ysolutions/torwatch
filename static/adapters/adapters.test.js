@@ -130,3 +130,63 @@ test('opfs memory fallback remove/stat-miss/listIds', async () => {
   assert.deepEqual(await o.listIds(), ['b']);
   await o.remove('missing'); // no throw
 });
+
+test('opfs memory fallback: 1000 sequential 1KB writes stay fast and correct', async () => {
+  const o = opfsAdapter(null);
+  const N = 1000;
+  const t0 = Date.now();
+  for (let i = 0; i < N; i++) {
+    await o.write('big', i * 1024, new Uint8Array(1024).fill(i & 0xff));
+  }
+  const ms = Date.now() - t0;
+  assert.ok(ms < 10000, `1000 writes took ${ms}ms (O(n^2) suspected)`);
+  assert.deepEqual((await o.stat('big')).size, N * 1024);
+  // spot-check first/middle/last chunks
+  for (const i of [0, 499, N - 1]) {
+    const got = await o.read('big', i * 1024, i * 1024 + 1023);
+    assert.equal(got.length, 1024);
+    assert.ok(got.every((b) => b === (i & 0xff)), `chunk ${i} corrupt`);
+  }
+});
+
+test('opfs positional write uses seek when the stream supports it', async () => {
+  const store = new Map();
+  const ops = [];
+  const root = {
+    async getFileHandle(n, opts) {
+      if (!store.has(n) && !opts?.create) {
+        const e = new Error('missing');
+        e.name = 'NotFoundError';
+        throw e;
+      }
+      if (!store.has(n)) store.set(n, new Uint8Array(0));
+      return {
+        async getFile() {
+          const cur = store.get(n);
+          return { arrayBuffer: async () => cur.slice().buffer, size: cur.length };
+        },
+        async createWritable() {
+          let pos = 0;
+          return {
+            async seek(p) { ops.push(['seek', p]); pos = p; },
+            async write(chunk) {
+              ops.push(['write', pos, chunk.length]);
+              const cur = store.get(n);
+              const next = new Uint8Array(Math.max(cur.length, pos + chunk.length));
+              next.set(cur, 0);
+              next.set(chunk, pos);
+              store.set(n, next);
+              pos += chunk.length;
+            },
+            async close() {},
+          };
+        },
+      };
+    },
+  };
+  const o = opfsAdapter(root);
+  await o.write('m1', 0, new Uint8Array([1, 2, 3]));
+  await o.write('m1', 10, new Uint8Array([9])); // sparse: no full re-write
+  assert.deepEqual(ops[2], ['seek', 10]);
+  assert.deepEqual([...await o.read('m1', 0, 10)], [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 9]);
+});

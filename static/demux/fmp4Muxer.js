@@ -107,7 +107,7 @@ export function codecString(track) {
       const compat = ((p[2] << 24) | (p[3] << 16) | (p[4] << 8) | p[5]) >>> 0;
       const tier = (p[1] & 32) ? 'H' : 'L';
       const constraints = [...p.slice(6, 12)].map(b => hex(b)).join('');
-      return `hev1.${idc}.${compat.toString(16).toLowerCase()}.${tier}${p[12]}.${constraints}`;
+      return `hev1.${idc}.${compat.toString(16).toLowerCase().padStart(8, '0')}.${tier}${p[12]}.${constraints}`;
     }
     case 'A_AAC':
       return `mp4a.40.${parseASC(track.codecPrivate).aot}`;

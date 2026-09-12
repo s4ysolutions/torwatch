@@ -285,14 +285,14 @@ function mountPlay({ id, file }) {
     }
   });
 
-  // Resolve the file + attach the player.
+  // Resolve the file + attach the player. Deep links reuse the same
+  // unbounded poll contract as Watch (60s watchdog → 'waiting', breaks
+  // only on 'ready'), so opening #/play/... early waits for peers instead
+  // of throwing "not ready yet".
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null });
-  adapter
-    .getMagnet(id)
+  pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS })
     .then(async (info) => {
       if (cancelled) return;
-      if (info.state === 'error') throw new Error(info.error || 'magnet failed');
-      if (info.state !== 'ready') throw new Error('torrent not ready yet — go back and Watch again');
       const f = (info.files ?? []).find((x) => x.index === fileIndex);
       const name = f?.path ?? `file-${fileIndex}`;
       if (/\.mkv$/i.test(name)) {

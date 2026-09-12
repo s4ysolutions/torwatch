@@ -33,6 +33,24 @@ func TestStaticIndex(t *testing.T) {
 	}
 }
 
+func TestPostMagnetBodyLimit(t *testing.T) {
+	srv := newServer(t.TempDir(), &fakeFileManager{data: []byte("x")}, Opts{})
+	// Oversize body → 413.
+	big := `{"magnet":"magnet:?xt=urn:btih:` + strings.Repeat("a", 8<<10) + `"}`
+	r := httptest.NewRecorder()
+	huge := httptest.NewRequest("POST", "/api/magnets", strings.NewReader(big))
+	srv.ServeHTTP(r, huge)
+	if r.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize: got %d %q", r.Code, r.Body.String())
+	}
+	// Small valid body still works.
+	r = httptest.NewRecorder()
+	srv.ServeHTTP(r, httptest.NewRequest("POST", "/api/magnets", strings.NewReader(`{"magnet":"magnet:?xt=urn:btih:abc"}`)))
+	if r.Code != http.StatusOK {
+		t.Fatalf("valid: got %d %q", r.Code, r.Body.String())
+	}
+}
+
 func TestPostMagnetBad(t *testing.T) {
 	m := torrents.NewManagerWithClient(nil, t.TempDir())
 	h := New(t.TempDir(), m, Opts{})

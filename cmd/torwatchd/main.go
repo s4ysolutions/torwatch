@@ -37,7 +37,11 @@ func parseBytes(s string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("bad size %q", s)
 	}
-	return int64(f * float64(mult)), nil
+	n := int64(f * float64(mult))
+	if n <= 0 {
+		return 0, fmt.Errorf("bad size %q: must be positive", s)
+	}
+	return n, nil
 }
 
 func main() {

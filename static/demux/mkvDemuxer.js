@@ -190,11 +190,11 @@ export class MkvDemuxer {
     const buf = this.stream.buf;
     const ws = this.stream.winStart;
     const rel = (abs) => abs - ws;
-    if (lacing === 0) return [buf.slice(rel(dataOff), rel(dataEnd))];
+    const dataRelEnd = rel(dataEnd);
+    if (lacing === 0) return [buf.slice(rel(dataOff), dataRelEnd)];
     if (lacing === 1) {
       // Xiph lacing: count byte, then frameCount-1 sizes.
       let p = rel(dataOff);
-      const dataRelEnd = rel(dataEnd);
       const frames = buf[p++] + 1;
       const sizes = [];
       for (let i = 0; i < frames - 1; i++) {
@@ -209,6 +209,42 @@ export class MkvDemuxer {
       }
       const out = [];
       for (let i = 0; i < frames - 1; i++) {
+        out.push(buf.slice(p, p + sizes[i]));
+        p += sizes[i];
+      }
+      out.push(buf.slice(p, dataRelEnd));
+      return out;
+    }
+    if (lacing === 2) {
+      // Fixed-size lacing: count byte, frames split the rest equally.
+      const p = rel(dataOff);
+      const frames = buf[p] + 1;
+      const body = p + 1;
+      const total = dataRelEnd - body;
+      if (frames <= 0 || total < 0 || total % frames !== 0) throw new Error('bad fixed-size lacing');
+      const size = total / frames;
+      const out = [];
+      for (let i = 0; i < frames; i++) out.push(buf.slice(body + i * size, body + (i + 1) * size));
+      return out;
+    }
+    if (lacing === 3) {
+      // EBML lacing: count byte, first size unsigned vint, the rest signed
+      // diffs to the previous size (bias 2^(7*len-1)-1). Last frame = rest.
+      let p = rel(dataOff);
+      if (p >= dataRelEnd) throw new Error('bad EBML lacing');
+      const frames = buf[p++] + 1;
+      const sizes = [];
+      for (let i = 0; i < frames - 1; i++) {
+        if (p >= dataRelEnd) throw new Error('bad EBML lacing');
+        const v = readVint(buf, p);
+        if (v.size > 6 || v.value === -1) throw new Error('bad EBML lacing');
+        p += v.size;
+        if (i === 0) sizes.push(v.value);
+        else sizes.push(sizes[i - 1] + (v.value - (Math.pow(2, 7 * v.size - 1) - 1)));
+      }
+      const out = [];
+      for (let i = 0; i < frames - 1; i++) {
+        if (sizes[i] < 0 || p + sizes[i] > dataRelEnd) throw new Error('bad EBML lacing');
         out.push(buf.slice(p, p + sizes[i]));
         p += sizes[i];
       }

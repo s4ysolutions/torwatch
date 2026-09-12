@@ -25,6 +25,9 @@ text-decoration:none;font-weight:650;font-size:.95rem;border:1px solid var(--ink
 .downloads a:first-child:hover{background:var(--red-d)}
 .downloads a:not(:first-child):hover{background:var(--wash)}
 
+.back-link{display:inline-block;margin-bottom:.6rem;color:var(--muted);text-decoration:none;font-weight:650}
+.back-link:hover{color:var(--red)}
+
 /* --- subtitles widget --- */
 .subs-widget{margin-top:1.25rem}
 .subs-bar{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:.5rem}

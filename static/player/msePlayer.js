@@ -4,7 +4,17 @@ import { initSegment, fragment, codecString } from '../demux/fmp4Muxer.js';
 // only when open. (Player→views import is intentional per that contract.)
 import { drainGroups, finalizePlayback } from '../views/videoStageView.js';
 
-export function createMsePlayer(videoEl, demuxer, trackList) {
+export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
+  const onError = typeof hooks.onError === 'function' ? hooks.onError : () => {};
+  // Halt the pipeline exactly once: stale every in-flight pump and drop
+  // queued appends so a dead demuxer/buffer can't cascade exceptions.
+  function halt(e) {
+    generation++;
+    queue.length = 0;
+    try {
+      onError(e);
+    } catch {}
+  }
   const ms = new MediaSource();
   videoEl.src = URL.createObjectURL(ms);
   let vbuf = null, abuf = null;
@@ -39,7 +49,12 @@ export function createMsePlayer(videoEl, demuxer, trackList) {
     const { buf, data } = queue[0];
     if (!buf || buf.updating) return;
     queue.shift();
-    buf.appendBuffer(data);
+    try {
+      buf.appendBuffer(data);
+    } catch (e) {
+      halt(e);
+      return;
+    }
     if (pressureResolve && queue.length < MAX_QUEUE) {
       const r = pressureResolve;
       pressureResolve = null;
@@ -92,6 +107,10 @@ export function createMsePlayer(videoEl, demuxer, trackList) {
           }
         }
       }
+    } catch (e) {
+      // Demuxer/network failure mid-stream: halt so the finally below
+      // (gen now stale) skips flush/endOfStream, and surface one error.
+      if (gen === generation) halt(e);
     } finally {
       // F-A: flush trailing partial groups, then endOfStream once drained.
       if (gen === generation) {

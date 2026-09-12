@@ -174,6 +174,7 @@ function mountPlay({ id, file }) {
   clear(stageHost);
   clear(subsHost);
   clear(dlHost);
+  stageHost.appendChild(el('a', { href: '#/', class: 'back-link' }, '← New magnet'));
 
   let cancelled = false;
   let player = null;
@@ -341,7 +342,11 @@ function mountPlay({ id, file }) {
           await addExternalSubs({ name: p.name, text: p.text });
           if (cancelled) return;
         }
-        player = createMsePlayer(video, demuxer, htracks);
+        player = createMsePlayer(video, demuxer, htracks, {
+          onError: (e) => {
+            if (!cancelled) fail(e);
+          },
+        });
       } else {
         // Native path: direct file URL, browser decodes.
         tracks.set({ audio: [], subtitles: [], activeAudio: null, activeSubtitle: null });

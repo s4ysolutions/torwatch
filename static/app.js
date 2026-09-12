@@ -20,9 +20,11 @@ import {
   loadMagnet,
   pollMagnetReady,
   pickVideoFile,
+  NoPlayableError,
   loadPosition,
   bindPosition,
 } from './usecases/loadMagnet.js';
+import { el } from './util/dom.js';
 import { cachingFetchRange } from './usecases/cacheFile.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
@@ -62,6 +64,27 @@ function clear(node) {
 
 // --- home actions -----------------------------------------------------------
 
+// Unplayable torrent (e.g. all .avi): the error goes to the status bar and
+// every file gets a direct download link below the card.
+function showFileLinks(info) {
+  const host = $('dl');
+  if (!host || !info) return;
+  clear(host);
+  for (const f of info.files ?? []) {
+    const name = String(f.path ?? `file-${f.index}`).split('/').pop();
+    const mb = Math.round((f.size ?? 0) / 1048576);
+    host.appendChild(el('a', {
+      href: `/api/magnets/${info.id}/files/${f.index}`,
+      download: name,
+    }, `⬇ ${name} (${mb} MB)`));
+  }
+}
+
+function failWithFiles(e) {
+  fail(e);
+  if (e instanceof NoPlayableError) showFileLinks(e.info);
+}
+
 async function submitMagnet(magnet) {
   // C3: busy hook is the `fetching` phase (statusBar shows busy + text).
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
@@ -69,7 +92,7 @@ async function submitMagnet(magnet) {
     const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS });
     go(`#/play/${id}/${fileIndex}`);
   } catch (e) {
-    fail(e);
+    failWithFiles(e);
   }
 }
 
@@ -81,11 +104,11 @@ async function submitTorrent(file) {
     // Same poll contract as loadMagnet (C4): unbounded, 'waiting' after
     // WATCHDOG_MS, breaks only on state === 'ready'.
     const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS });
-    const fileIndex = pickVideoFile(info.files ?? []);
+    const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
     playerState.set({ ...playerState.get(), phase: 'ready', magnetId: id, fileIndex, error: null });
     go(`#/play/${id}/${fileIndex}`);
   } catch (e) {
-    fail(e);
+    failWithFiles(e);
   }
 }
 

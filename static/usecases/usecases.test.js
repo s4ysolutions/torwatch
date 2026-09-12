@@ -5,7 +5,7 @@ import { opfsAdapter } from '../adapters/opfsAdapter.js';
 import { store } from '../util/store.js';
 import { playerState } from '../domain/playerState.js';
 import { tracks } from '../domain/tracks.js';
-import { loadMagnet, savePosition, loadPosition, bindPosition } from './loadMagnet.js';
+import { loadMagnet, savePosition, loadPosition, bindPosition, pickVideoFile, NoPlayableError } from './loadMagnet.js';
 import { cachingFetchRange } from './cacheFile.js';
 import { parseSrt, loadSubtitles, addExternalSubs } from './loadSubtitles.js';
 import { switchAudio } from './switchAudio.js';
@@ -142,6 +142,25 @@ test('bindPosition saves on timeupdate, unbind stops', () => {
   v.currentTime = 99;
   v.fire('timeupdate');
   assert.equal(loadPosition('id2', 3), 42);
+});
+
+// --- pickVideoFile ---
+
+test('pickVideoFile throws NoPlayableError carrying torrent info', () => {
+  const info = { id: 'abc', name: 'Some AVI pack', files: [{ index: 0, path: 'a.avi', size: 5 }] };
+  assert.throws(
+    () => pickVideoFile(info.files, info),
+    (e) => e instanceof NoPlayableError && e.info === info && /Some AVI pack/.test(e.message),
+  );
+});
+
+test('pickVideoFile still picks largest playable file', () => {
+  const files = [
+    { index: 0, path: 'a.avi', size: 900 },
+    { index: 1, path: 'b.mkv', size: 100 },
+    { index: 2, path: 'c.mp4', size: 200 },
+  ];
+  assert.equal(pickVideoFile(files, { id: 'x' }), 2);
 });
 
 // --- cachingFetchRange extras ---

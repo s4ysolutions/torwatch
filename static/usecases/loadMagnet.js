@@ -10,13 +10,24 @@ const HISTORY_CAP = 20;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export function pickVideoFile(files) {
+export class NoPlayableError extends Error {
+  constructor(info) {
+    super(`no playable video file (.mp4/.mkv/.webm) in "${info?.name || info?.id || 'torrent'}" — download links below`);
+    this.name = 'NoPlayableError';
+    this.info = info ?? null;
+  }
+}
+
+export function pickVideoFile(files, info = null) {
   let best = null;
   for (const f of files ?? []) {
     if (!VIDEO_RE.test(f.path ?? '')) continue;
     if (!best || (f.size ?? 0) > (best.size ?? 0)) best = f;
   }
-  if (!best) throw new Error('no playable video file (.mp4/.mkv/.webm)');
+  if (!best) {
+    if (info) throw new NoPlayableError(info);
+    throw new Error('no playable video file (.mp4/.mkv/.webm)');
+  }
   return best.index;
 }
 
@@ -68,7 +79,7 @@ export async function loadMagnet({ adapter, magnet, pollMs = POLL_MS, watchdogMs
   playerState.set({ ...playerState.get(), phase: 'loading', error: null });
   const { id } = await adapter.addMagnet(magnet);
   const info = await pollMagnetReady({ adapter, id, pollMs, watchdogMs, onStall });
-  const fileIndex = pickVideoFile(info.files ?? []);
+  const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
   const s = history();
   const prev = s.get('history', []);
   s.set('history', [magnet, ...prev.filter((m) => m !== magnet)].slice(0, HISTORY_CAP));

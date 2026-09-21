@@ -30,7 +30,7 @@ export function downloadsRow(containerOrGet, maybeGet) {
 
   const links = [];
   if (videoUrl) links.push(el('a', { href: videoUrl, download: videoName || 'video' }, ['⬇ video']));
-  if (srtUrl) links.push(el('a', { href: srtUrl, download: true }, [`⬇ ${srtLabel || '.srt'}`]));
+  if (srtUrl) links.push(el('a', { href: srtUrl, download: srtLabel || '.srt' }, [`⬇ ${srtLabel || '.srt'}`]));
 
   const row = el('div', { class: 'downloads' }, links);
   if (!links.length) row.style.display = 'none';

@@ -7,6 +7,7 @@
 
 import { el } from '../util/dom.js';
 import { store } from '../util/store.js';
+import { playerState } from '../domain/playerState.js';
 
 function isContainer(x) {
   return x && (x.nodeType === 1 || typeof x.appendChild === 'function');
@@ -87,11 +88,32 @@ export function inputCardView(containerOrProps, maybeProps) {
     if (f && typeof onSubsFile === 'function') onSubsFile(f);
   };
   const onEngineChange = (e) => {
+    try {
+      const ph = playerState.get()?.phase;
+      if (ph !== 'idle' && ph !== 'error') return;
+    } catch {}
     const v = e?.target?.value;
     if ((v === 'browser' || v === 'server') && typeof onEngine === 'function') onEngine(v);
   };
   const engineRadios = [...engineRow.querySelectorAll('input[name="engine"]')];
+  const syncEngineDisabled = (st) => {
+    let ph;
+    try { ph = st?.phase ?? playerState.get()?.phase; } catch { return; }
+    const disabled = ph !== 'idle' && ph !== 'error';
+    for (const r of engineRadios) {
+      try {
+        r.disabled = disabled;
+        if (disabled) r.setAttribute('disabled', '');
+        else r.removeAttribute('disabled');
+      } catch {}
+    }
+  };
   for (const r of engineRadios) r.addEventListener('change', onEngineChange);
+  let unsubEngine = null;
+  try {
+    syncEngineDisabled(playerState.get());
+    unsubEngine = playerState.subscribe(syncEngineDisabled);
+  } catch {}
 
   watchBtn.addEventListener('click', onWatchClick);
   magnetInput.addEventListener('keydown', onMagnetKey);
@@ -102,6 +124,7 @@ export function inputCardView(containerOrProps, maybeProps) {
   if (container) container.appendChild(card);
 
   const dispose = () => {
+    try { if (typeof unsubEngine === 'function') unsubEngine(); } catch {}
     watchBtn.removeEventListener('click', onWatchClick);
     magnetInput.removeEventListener('keydown', onMagnetKey);
     recent.removeEventListener('change', onRecentChange);

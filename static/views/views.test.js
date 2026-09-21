@@ -32,10 +32,11 @@ function makeStubEl(tag) {
     querySelectorAll(sel) {
       const m = /^(\w+)(?:\[name="([^"]+)"\])?$/.exec(String(sel));
       return walk(node).filter((n) => {
+        if (n === node) return false;
         if (m && m[1] && n.tagName !== m[1].toUpperCase()) return false;
         if (m && m[2] && n.attrs?.name !== m[2]) return false;
         return true;
-      }).slice(1);
+      });
     },
     querySelector(sel) { return this.querySelectorAll(sel)[0] ?? null; },
     classList: {

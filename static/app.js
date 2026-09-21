@@ -91,29 +91,32 @@ function clear(node) {
 
 // Unplayable torrent (e.g. all .avi): the error goes to the status bar and
 // every file gets a direct download link below the card.
-let homeCancelled = false;
+let homeGen = 0;
 let fileLinkUrls = [];
 async function showFileLinks(info) {
+  const myGen = ++homeGen;
+  const stillCurrent = () => myGen === homeGen;
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
   const row = el('div', { class: 'downloads' });
   host.appendChild(row);
   for (const f of info.files ?? []) {
-    if (homeCancelled) return;
+    if (!stillCurrent()) return;
     const name = String(f.path ?? `file-${f.index}`).split('/').pop();
     const mb = Math.round((f.size ?? 0) / 1048576);
-    let href = `/api/magnets/${normId(info.id)}/files/${f.index}`;
+    let href = null;
     try {
       const dl = await adapter.downloadFile(normId(info.id), f.index);
-      if (homeCancelled) return;
+      if (!stillCurrent()) return;
       if (dl.url) href = dl.url;
       else if (dl.blob) {
         href = URL.createObjectURL(dl.blob);
         fileLinkUrls.push(href);
       }
-    } catch { if (homeCancelled) return; }
-    if (homeCancelled) return;
+    } catch { if (!stillCurrent()) return; }
+    if (!stillCurrent()) return;
+    if (!href) continue;
     row.appendChild(el('a', {
       href,
       download: name,
@@ -186,7 +189,7 @@ function toSrt(cues) {
 
 function mountHome() {
   playerState.set({ ...playerState.get(), phase: 'idle', error: null });
-  homeCancelled = false;
+  homeGen++;
   fileLinkUrls = [];
   const host = $('card');
   clear(host);
@@ -198,10 +201,16 @@ function mountHome() {
     onMagnet: (m) => void submitMagnet(m),
     onTorrentFile: (f) => void submitTorrent(f),
     onSubsFile: (f) => void stashSubs(f),
-    onEngine: (v) => { engineStore.set('engine', v); adapter = buildAdapter(v); },
+    onEngine: (v) => {
+      try {
+        const ph = playerState.get()?.phase;
+        if (ph !== 'idle' && ph !== 'error') return;
+      } catch {}
+      engineStore.set('engine', v); adapter = buildAdapter(v);
+    },
   });
   return () => {
-    homeCancelled = true;
+    homeGen++;
     for (const u of fileLinkUrls.splice(0)) {
       try { URL.revokeObjectURL(u); } catch {}
     }
@@ -328,6 +337,9 @@ function mountPlay({ id: rawId, file }) {
       if (typeof dlDispose === 'function') dlDispose();
     } catch {}
     dlDispose = null;
+    for (const u of videoBlobUrls.splice(0)) {
+      try { URL.revokeObjectURL(u); } catch {}
+    }
     if (srtUrl) {
       try {
         URL.revokeObjectURL(srtUrl);
@@ -348,7 +360,7 @@ function mountPlay({ id: rawId, file }) {
     let videoHref = null, videoName = 'video';
     try {
       const dl = await adapter.downloadFile(id, fileIndex);
-      if (!stillCurrent()) { if (dl.blob) URL.revokeObjectURL(URL.createObjectURL(dl.blob)); return; }
+      if (!stillCurrent()) return;
       videoName = dl.name || videoName;
       videoHref = dl.url ?? URL.createObjectURL(dl.blob);
       if (!dl.url) videoBlobUrls.push(videoHref);

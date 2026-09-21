@@ -150,19 +150,45 @@ test('fetchRange returns short read at EOF', async () => {
   assert.deepEqual([...out], [...bytes.slice(90, 100)]);
 });
 
+test('attachNative rejects with clear error when stream server unavailable', async () => {
+  const client = fakeClient();
+  client.createServer = (opts) => { if (!opts?.controller) throw new Error('Invalid worker registration'); return {}; };
+  const hadNav = Object.hasOwn(globalThis, 'navigator');
+  const origNav = globalThis.navigator;
+  try {
+    Object.defineProperty(globalThis, 'navigator', { value: undefined, configurable: true, writable: true });
+    const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
+    const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
+    client.get(id).files = [{ name: 'm.mp4', path: 'm.mp4', length: 5,
+      streamTo() { throw new Error('should not stream'); } }];
+    await assert.rejects(() => a.attachNative(id, 0, {}), /native playback unavailable \(stream server failed\)/);
+  } finally {
+    if (hadNav) Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true, writable: true });
+    else delete globalThis.navigator;
+  }
+});
+
 test('attachNative uses streamTo and cleanup detaches', async () => {
   const client = fakeClient();
-  client.createServer = () => {};
-  const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
-  const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
-  const calls = [];
-  client.get(id).files = [{ name: 'm.mp4', path: 'm.mp4', length: 5,
-    streamTo(el) { calls.push(['streamTo', el]); } }];
-  const video = { pause() {}, removeAttribute(n) { calls.push(['remove', n]); }, load() { calls.push(['load']); } };
-  const cleanup = await a.attachNative(id, 0, video);
-  assert.deepEqual(calls[0][0], 'streamTo');
-  await cleanup();
-  assert.ok(calls.some(c => c[0] === 'remove'));
+  client.createServer = (opts) => { if (!opts?.controller) throw new Error('Invalid worker registration'); return {}; };
+  const hadNav = Object.hasOwn(globalThis, 'navigator');
+  const origNav = globalThis.navigator;
+  globalThis.navigator = { serviceWorker: { ready: Promise.resolve({}) } };
+  try {
+    const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
+    const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
+    const calls = [];
+    client.get(id).files = [{ name: 'm.mp4', path: 'm.mp4', length: 5,
+      streamTo(el) { calls.push(['streamTo', el]); } }];
+    const video = { pause() {}, removeAttribute(n) { calls.push(['remove', n]); }, load() { calls.push(['load']); } };
+    const cleanup = await a.attachNative(id, 0, video);
+    assert.deepEqual(calls[0][0], 'streamTo');
+    await cleanup();
+    assert.ok(calls.some(c => c[0] === 'remove'));
+  } finally {
+    if (hadNav) globalThis.navigator = origNav;
+    else delete globalThis.navigator;
+  }
 });
 
 test('downloadFile returns blob variant with filename', async () => {
@@ -170,11 +196,23 @@ test('downloadFile returns blob variant with filename', async () => {
   const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
   const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
   client.get(id).files = [{ name: 'm.mkv', path: 'dir/m.mkv', length: 5,
-    blob(cb) { cb(new Blob(['hello'])); } }];
+    async blob() { return new Blob(['hello']); } }];
   const dl = await a.downloadFile(id, 0);
   assert.equal(dl.name, 'm.mkv');
   assert.ok(dl.blob instanceof Blob);
   assert.equal(dl.url, undefined);
+});
+
+test('downloadFile falls back to arrayBuffer', async () => {
+  const client = fakeClient();
+  const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
+  const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
+  client.get(id).files = [{ name: 'm.mkv', path: 'dir/m.mkv', length: 5,
+    async arrayBuffer() { return new TextEncoder().encode('hello').buffer; } }];
+  const dl = await a.downloadFile(id, 0);
+  assert.equal(dl.name, 'm.mkv');
+  assert.ok(dl.blob instanceof Blob);
+  assert.equal(await dl.blob.text(), 'hello');
 });
 
 test('MkvDemuxer extracts embedded subs over adapter fetchRange', async () => {

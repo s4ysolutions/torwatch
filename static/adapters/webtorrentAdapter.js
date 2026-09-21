@@ -6,6 +6,13 @@ export const PINNED_TRACKERS = [
 
 const norm = (s) => String(s).toLowerCase();
 
+async function swController() {
+  try {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return undefined;
+    return await navigator.serviceWorker.ready;
+  } catch { return undefined; }
+}
+
 function mapFiles(torrent) {
   return (torrent.files ?? []).map((f, i) => ({
     index: i,
@@ -75,11 +82,9 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
     },
     async attachNative(id, index, videoEl) {
       const c = ensureClient();
-      let serverOk = true;
-      if (typeof c.createServer === 'function' && !c._twServer) {
-        try { c._twServer = c.createServer(); } catch { serverOk = false; }
-      }
-      if (!serverOk) throw new Error('native playback unavailable (stream server failed)');
+      const controller = await swController();
+      try { c._twServer = c._twServer ?? c.createServer(controller ? { controller } : undefined); } catch { /* fall through to clear error below */ }
+      if (!c._twServer) throw new Error('native playback unavailable (stream server failed)');
       const t = withTorrent(id);
       const f = (t?.files ?? [])[index];
       if (!f || typeof f.streamTo !== 'function') throw new Error('native playback unavailable');
@@ -94,18 +99,15 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       const f = (t?.files ?? [])[index];
       if (!f) throw new Error('bad file index ' + index);
       const name = String(f.path ?? f.name ?? `file-${index}`).split('/').pop();
-      const blob = await new Promise((resolve, reject) => {
-        try {
-          if (typeof f.blob === 'function') return f.blob((b) => b ? resolve(b) : reject(new Error('blob failed')));
-          if (typeof f.arrayBuffer === 'function') {
-            return f.arrayBuffer((ab) => {
-              try { resolve(new Blob([ab])); } catch (e) { reject(e); }
-            });
-          }
-          reject(new Error('download unavailable'));
-        } catch (e) { reject(e); }
-      });
-      return { name, blob };
+      if (typeof f.blob === 'function') {
+        const b = await f.blob();
+        return { name, blob: b ?? undefined };
+      }
+      if (typeof f.arrayBuffer === 'function') {
+        const ab = await f.arrayBuffer();
+        return { name, blob: new Blob([ab]) };
+      }
+      throw new Error('download unavailable');
     },
   };
 }

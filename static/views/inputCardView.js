@@ -110,6 +110,8 @@ export function inputCardView(containerOrProps, maybeProps) {
   };
   for (const r of engineRadios) r.addEventListener('change', onEngineChange);
   let unsubEngine = null;
+  // First view to subscribe to playerState: keeps the engine toggle
+  // disabled while a play is active (idle/error only).
   try {
     syncEngineDisabled(playerState.get());
     unsubEngine = playerState.subscribe(syncEngineDisabled);

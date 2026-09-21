@@ -52,9 +52,10 @@ let opfs = opfsAdapter(null); // upgraded to OPFS dir at boot when available
 // Subs file picked on home (no video there yet) → loaded on play mount.
 let pendingSubs = null;
 
-// Engine store + id normalization (single choke point; WebTorrent infoHash
-// is lowercase hex, anacrolix `HexString()` uppercase — lowercase everywhere
-// so the OPFS key `${id}:${index}` and routes match across engines).
+// Engine store + id normalization (single choke point; both WebTorrent
+// infoHash and anacrolix `HexString()` are lowercase hex (`%x`) — lowercase
+// everywhere anyway (no-op for server ids, required for WebTorrent ids) so
+// the OPFS key `${id}:${index}` and routes match across engines).
 const engineStore = store.ns('torwatch');
 const getEngine = () => engineStore.get('engine', 'browser');
 const normId = (s) => String(s).toLowerCase();
@@ -99,6 +100,9 @@ async function showFileLinks(info) {
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
+  for (const u of fileLinkUrls.splice(0)) {
+    try { URL.revokeObjectURL(u); } catch {}
+  }
   const row = el('div', { class: 'downloads' });
   host.appendChild(row);
   for (const f of info.files ?? []) {
@@ -483,11 +487,14 @@ async function ensureSw() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   // Adapters: backend always; OPFS chunk cache when the browser offers it.
+  // Force the stored label to the engine actually used so the checked radio
+  // matches (no WebTorrent/WebRTC → server).
+  if (getEngine() === 'browser' && !canUseBrowserEngine()) engineStore.set('engine', 'server');
   adapter = buildAdapter(getEngine());
   // streamTo needs the worker controlling the page, so the very first
   // browser-engine native play after first install may need one reload —
   // covered by a Task 7 manual step.
-  void ensureSw();
+  if (getEngine() === 'browser') void ensureSw();
   try {
     const root = await globalThis.navigator?.storage?.getDirectory?.();
     opfs = opfsAdapter(root ?? null);

@@ -7,11 +7,13 @@ import { MkvDemuxer } from '../demux/mkvDemuxer.js';
 
 function fakeTorrent({ infoHash = 'ab'.repeat(20), name = 'vid', files = [] } = {}) {
   const handlers = {};
-  return {
+  const t = {
     infoHash, name, files, announce: [], ready: false,
-    on(ev, fn) { (handlers[ev] ??= []).push(fn); return this; },
+    errorOns: 0,
+    on(ev, fn) { if (ev === 'error') t.errorOns++; (handlers[ev] ??= []).push(fn); return this; },
     _emit(ev, ...a) { for (const fn of handlers[ev] ?? []) fn(...a); },
   };
+  return t;
 }
 
 function fakeClient() {
@@ -101,6 +103,16 @@ test('re-add after error clears stale error state', async () => {
   info = await a.getMagnet(id);
   assert.equal(info.state, 'fetching-meta');
   assert.ok(!('error' in info));
+  // Single error-listener registration on the re-added torrent (no dupes).
+  assert.equal(client.get(id).errorOns, 1);
+  // Duplicate add without delete must not stack a second listener when the
+  // client dedupes to the same torrent object.
+  const same = client.get(id);
+  const origAdd = client.add.bind(client);
+  client.add = (...args) => same;
+  await a.addMagnet(magnet);
+  client.add = origAdd;
+  assert.equal(same.errorOns, 1);
 });
 
 test('re-add via addTorrentFile clears stale error state', async () => {
@@ -173,8 +185,8 @@ test('attachNative uses streamTo and cleanup detaches', async () => {
   client.createServer = (opts) => { if (!opts?.controller) throw new Error('Invalid worker registration'); return {}; };
   const hadNav = Object.hasOwn(globalThis, 'navigator');
   const origNav = globalThis.navigator;
-  globalThis.navigator = { serviceWorker: { ready: Promise.resolve({}) } };
   try {
+    Object.defineProperty(globalThis, 'navigator', { value: { serviceWorker: { ready: Promise.resolve({}) } }, configurable: true, writable: true });
     const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
     const { id } = await a.addMagnet('magnet:?xt=urn:btih:' + 'ab'.repeat(20));
     const calls = [];
@@ -186,7 +198,7 @@ test('attachNative uses streamTo and cleanup detaches', async () => {
     await cleanup();
     assert.ok(calls.some(c => c[0] === 'remove'));
   } finally {
-    if (hadNav) globalThis.navigator = origNav;
+    if (hadNav) Object.defineProperty(globalThis, 'navigator', { value: origNav, configurable: true, writable: true });
     else delete globalThis.navigator;
   }
 });

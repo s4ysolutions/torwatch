@@ -23,3 +23,12 @@ test('service worker file exists for webtorrent server', () => {
   const sw = path.join(here, '..', 'sw.js');
   assert.ok(existsSync(sw), 'static/sw.js missing');
 });
+
+test('index.html loads vendor bundle before the app module', () => {
+  const html = readFileSync(path.join(here, '..', 'index.html'), 'utf8');
+  const vendorIdx = html.indexOf('vendor/webtorrent.min.js');
+  const appIdx = html.indexOf('./app.js');
+  assert.ok(vendorIdx !== -1, 'index.html must reference vendor/webtorrent.min.js');
+  assert.ok(appIdx !== -1, 'index.html must reference ./app.js');
+  assert.ok(vendorIdx < appIdx, 'vendor bundle must load before the app module');
+});

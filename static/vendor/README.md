@@ -12,4 +12,5 @@ VER="2.8.5"
 curl -fsSL "https://cdn.jsdelivr.net/npm/webtorrent@${VER}/dist/webtorrent.min.js" -o static/vendor/webtorrent.min.js
 printf '/*! webtorrent@%s (MIT) vendored, see static/vendor/README.md */\n' "$VER" | cat - static/vendor/webtorrent.min.js > /tmp/wt.js && mv /tmp/wt.js static/vendor/webtorrent.min.js
 printf '%s\n' "$VER" > static/vendor/VERSION
+curl -fsSL "https://cdn.jsdelivr.net/npm/webtorrent@${VER}/LICENSE" -o static/vendor/LICENSE
 ```

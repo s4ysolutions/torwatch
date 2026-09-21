@@ -78,6 +78,9 @@ export async function pollMagnetReady({ adapter, id, pollMs = POLL_MS, watchdogM
 export async function loadMagnet({ adapter, magnet, pollMs = POLL_MS, watchdogMs = WATCHDOG_MS, onStall = null }) {
   playerState.set({ ...playerState.get(), phase: 'loading', error: null });
   const { id: rawId } = await adapter.addMagnet(magnet);
+  // Both engines hand back lowercase hex already (anacrolix HexString is
+  // `%x` lowercase, WebTorrent infoHash too) — lowercase anyway: no-op for
+  // server ids, required for WebTorrent ids.
   const id = String(rawId).toLowerCase();
   const info = await pollMagnetReady({ adapter, id, pollMs, watchdogMs, onStall });
   const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });

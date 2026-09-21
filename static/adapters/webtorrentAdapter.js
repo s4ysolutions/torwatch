@@ -24,6 +24,12 @@ function mapFiles(torrent) {
 export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PINNED_TRACKERS } = {}) {
   let client = null;
   const errors = new Map(); // id -> message
+  const hooked = new Set(); // lowercased ids with an 'error' listener attached
+  const hookErrors = (t, id) => {
+    if (hooked.has(id)) return;
+    hooked.add(id);
+    t.on('error', (e) => errors.set(id, e?.message ?? String(e)));
+  };
   const ensureClient = () => {
     if (!client) {
       client = typeof clientFactory === 'function'
@@ -39,7 +45,7 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       const t = c.add(magnet, { announce: [...announceList] });
       const id = norm(t.infoHash);
       errors.delete(id);
-      t.on('error', (e) => errors.set(id, e?.message ?? String(e)));
+      hookErrors(t, id);
       return { id };
     },
     async addTorrentFile(data) {
@@ -48,7 +54,7 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       const t = c.add(buf, { announce: [...announceList] });
       const id = norm(t.infoHash);
       errors.delete(id);
-      t.on('error', (e) => errors.set(id, e?.message ?? String(e)));
+      hookErrors(t, id);
       return { id };
     },
     async getMagnet(id) {
@@ -62,8 +68,11 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       return { id: nid, name: t.name ?? '', state: 'fetching-meta', files: [] };
     },
     async deleteMagnet(id) {
-      errors.delete(norm(id));
-      try { ensureClient().remove(norm(id), { destroyStore: true }); } catch {}
+      const nid = norm(id);
+      errors.delete(nid);
+      hooked.delete(nid);
+      const c = ensureClient();
+      try { c.remove(nid, { destroyStore: true }); } catch {}
     },
     searchSubs: typeof searchSubs === 'function' ? searchSubs : async () => { throw new Error('search not configured'); },
     async fetchRange(id, index, start, end) {

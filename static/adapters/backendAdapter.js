@@ -16,5 +16,20 @@ export function backendAdapter(fetchImpl = fetch) {
     },
     deleteMagnet: (id) => fetchImpl(`/api/magnets/${id}`, { method: 'DELETE' }),
     searchSubs: (q) => fetchImpl(`/api/opensubs?query=${encodeURIComponent(q)}`).then(json),
+    async attachNative(id, index, videoEl) {
+      videoEl.src = `/api/magnets/${id}/files/${index}`;
+      return () => {
+        try { videoEl.removeAttribute('src'); videoEl.load(); } catch {}
+      };
+    },
+    async downloadFile(id, index) {
+      let name = `file-${index}`;
+      try {
+        const info = await this.getMagnet(id);
+        const f = (info.files ?? []).find(x => x.index === index);
+        if (f?.path) name = String(f.path).split('/').pop() || name;
+      } catch {}
+      return { name, url: `/api/magnets/${id}/files/${index}` };
+    },
   };
 }

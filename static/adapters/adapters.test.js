@@ -190,3 +190,30 @@ test('opfs positional write uses seek when the stream supports it', async () => 
   assert.deepEqual(ops[2], ['seek', 10]);
   assert.deepEqual([...await o.read('m1', 0, 10)], [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 9]);
 });
+
+test('backend attachNative sets src and cleanup detaches', async () => {
+  const seen = [];
+  const fakeFetch = async (url, opts) => {
+    seen.push([url, opts]);
+    return { ok: true, json: async () => ({ id: 'x' }) };
+  };
+  const a = backendAdapter(fakeFetch);
+  const calls = [];
+  const video = {
+    set src(v) { calls.push(['src', v]); },
+    removeAttribute(n) { calls.push(['remove', n]); },
+    load() { calls.push(['load']); },
+  };
+  const cleanup = await a.attachNative('abc', 2, video);
+  assert.deepEqual(calls[0], ['src', '/api/magnets/abc/files/2']);
+  await cleanup();
+  assert.ok(calls.some(c => c[0] === 'remove'));
+});
+
+test('backend downloadFile returns url variant', async () => {
+  const a = backendAdapter(async () => ({ ok: true, json: async () => ({}) }));
+  const dl = await a.downloadFile('abc', 2);
+  assert.equal(dl.url, '/api/magnets/abc/files/2');
+  assert.equal(dl.blob, undefined);
+  assert.ok(typeof dl.name === 'string' && dl.name.length > 0);
+});

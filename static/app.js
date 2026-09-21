@@ -15,6 +15,8 @@ import { route, go } from './domain/route.js';
 import { playerState } from './domain/playerState.js';
 import { tracks } from './domain/tracks.js';
 import { backendAdapter } from './adapters/backendAdapter.js';
+import { webtorrentAdapter } from './adapters/webtorrentAdapter.js';
+import { store } from './util/store.js';
 import { opfsAdapter } from './adapters/opfsAdapter.js';
 import {
   loadMagnet,
@@ -45,10 +47,33 @@ const $ = (id) => document.getElementById(id);
 // flips phase to 'waiting' after this long, poll breaks only on 'ready'.
 const WATCHDOG_MS = 60000;
 
-let adapter = backendAdapter();
+let adapter = null;
 let opfs = opfsAdapter(null); // upgraded to OPFS dir at boot when available
 // Subs file picked on home (no video there yet) → loaded on play mount.
 let pendingSubs = null;
+
+// Engine store + id normalization (single choke point; WebTorrent infoHash
+// is lowercase hex, anacrolix `HexString()` uppercase — lowercase everywhere
+// so the OPFS key `${id}:${index}` and routes match across engines).
+const engineStore = store.ns('torwatch');
+const getEngine = () => engineStore.get('engine', 'browser');
+const normId = (s) => String(s).toLowerCase();
+
+// Capability check runs *before* selecting the engine (client creation is
+// lazy, so try/catch around the factory cannot catch it).
+function canUseBrowserEngine() {
+  try {
+    const WT = globalThis.WebTorrent;
+    return typeof WT !== 'undefined' && WT.WEBRTC_SUPPORT !== false;
+  } catch { return false; }
+}
+function buildAdapter(engine) {
+  if (engine === 'server' || !canUseBrowserEngine()) return backendAdapter();
+  if (!buildAdapter._server) buildAdapter._server = backendAdapter();
+  const server = buildAdapter._server;
+  return webtorrentAdapter({ searchSubs: (q) => server.searchSubs(q) });
+}
+adapter = buildAdapter(getEngine());
 
 function fail(e) {
   try {
@@ -66,25 +91,39 @@ function clear(node) {
 
 // Unplayable torrent (e.g. all .avi): the error goes to the status bar and
 // every file gets a direct download link below the card.
-function showFileLinks(info) {
+let homeCancelled = false;
+let fileLinkUrls = [];
+async function showFileLinks(info) {
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
   const row = el('div', { class: 'downloads' });
+  host.appendChild(row);
   for (const f of info.files ?? []) {
+    if (homeCancelled) return;
     const name = String(f.path ?? `file-${f.index}`).split('/').pop();
     const mb = Math.round((f.size ?? 0) / 1048576);
+    let href = `/api/magnets/${normId(info.id)}/files/${f.index}`;
+    try {
+      const dl = await adapter.downloadFile(normId(info.id), f.index);
+      if (homeCancelled) return;
+      if (dl.url) href = dl.url;
+      else if (dl.blob) {
+        href = URL.createObjectURL(dl.blob);
+        fileLinkUrls.push(href);
+      }
+    } catch { if (homeCancelled) return; }
+    if (homeCancelled) return;
     row.appendChild(el('a', {
-      href: `/api/magnets/${info.id}/files/${f.index}`,
+      href,
       download: name,
     }, `⬇ ${name} (${mb} MB)`));
   }
-  host.appendChild(row);
 }
 
 function failWithFiles(e) {
   fail(e);
-  if (e instanceof NoPlayableError) showFileLinks(e.info);
+  if (e instanceof NoPlayableError) void showFileLinks(e.info);
 }
 
 async function submitMagnet(magnet) {
@@ -92,7 +131,7 @@ async function submitMagnet(magnet) {
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
     const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS });
-    go(`#/play/${id}/${fileIndex}`);
+    go(`#/play/${normId(id)}/${fileIndex}`);
   } catch (e) {
     failWithFiles(e);
   }
@@ -102,7 +141,8 @@ async function submitTorrent(file) {
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
     const buf = await file.arrayBuffer();
-    const { id } = await adapter.addTorrentFile(buf);
+    const { id: rawId } = await adapter.addTorrentFile(buf);
+    const id = normId(rawId);
     // Same poll contract as loadMagnet (C4): unbounded, 'waiting' after
     // WATCHDOG_MS, breaks only on state === 'ready'.
     const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS });
@@ -146,15 +186,25 @@ function toSrt(cues) {
 
 function mountHome() {
   playerState.set({ ...playerState.get(), phase: 'idle', error: null });
+  homeCancelled = false;
+  fileLinkUrls = [];
   const host = $('card');
   clear(host);
   // C3: container form → disposeFn.
+  // Toggle invariant: the toggle lives only on the home card, and home
+  // mounts only at phase `idle` — so there is deliberately no mid-play
+  // engine switch to handle.
   const dispose = inputCardView(host, {
     onMagnet: (m) => void submitMagnet(m),
     onTorrentFile: (f) => void submitTorrent(f),
     onSubsFile: (f) => void stashSubs(f),
+    onEngine: (v) => { engineStore.set('engine', v); adapter = buildAdapter(v); },
   });
   return () => {
+    homeCancelled = true;
+    for (const u of fileLinkUrls.splice(0)) {
+      try { URL.revokeObjectURL(u); } catch {}
+    }
     try {
       dispose();
     } catch {}
@@ -162,7 +212,8 @@ function mountHome() {
   };
 }
 
-function mountPlay({ id, file }) {
+function mountPlay({ id: rawId, file }) {
+  const id = rawId == null ? rawId : normId(rawId);
   const fileIndex = Number(file);
   const disposers = [];
   const on = (off) => {
@@ -268,7 +319,11 @@ function mountPlay({ id, file }) {
   // Downloads row (C3: pull-once — re-invoke on state change, not reactive).
   let dlDispose = null;
   let srtUrl = null;
-  const renderDl = () => {
+  let dlGen = 0;
+  const videoBlobUrls = [];
+  const renderDl = async () => {
+    const gen = ++dlGen;
+    const stillCurrent = () => !cancelled && gen === dlGen;
     try {
       if (typeof dlDispose === 'function') dlDispose();
     } catch {}
@@ -290,16 +345,22 @@ function mountPlay({ id, file }) {
         srtLabel = active.label || '.srt';
       } catch {}
     }
-    dlDispose = downloadsRow(dlHost, () => ({
-      videoUrl: `/api/magnets/${id}/files/${fileIndex}`,
-      srtUrl: srtLink,
-      srtLabel,
-    }));
+    let videoHref = null, videoName = 'video';
+    try {
+      const dl = await adapter.downloadFile(id, fileIndex);
+      if (!stillCurrent()) { if (dl.blob) URL.revokeObjectURL(URL.createObjectURL(dl.blob)); return; }
+      videoName = dl.name || videoName;
+      videoHref = dl.url ?? URL.createObjectURL(dl.blob);
+      if (!dl.url) videoBlobUrls.push(videoHref);
+    } catch { if (!stillCurrent()) return; }
+    if (!stillCurrent()) return;
+    dlDispose = downloadsRow(dlHost, () => ({ videoUrl: videoHref, videoName, srtUrl: srtLink, srtLabel }));
   };
-  renderDl();
+  void renderDl();
   on(tracks.subscribe(renderDl));
   on(playerState.subscribe(renderDl));
   on(() => {
+    dlGen++;
     try {
       if (typeof dlDispose === 'function') dlDispose();
     } catch {}
@@ -308,6 +369,9 @@ function mountPlay({ id, file }) {
         URL.revokeObjectURL(srtUrl);
       } catch {}
       srtUrl = null;
+    }
+    for (const u of videoBlobUrls.splice(0)) {
+      try { URL.revokeObjectURL(u); } catch {}
     }
   });
 
@@ -356,7 +420,8 @@ function mountPlay({ id, file }) {
           await addExternalSubs({ name: p.name, text: p.text });
           if (cancelled) return;
         }
-        player = createNativePlayer(video, `/api/magnets/${id}/files/${fileIndex}`);
+        player = createNativePlayer(video, (el) => adapter.attachNative(id, fileIndex, el));
+        if (player.ready?.catch) player.ready.catch((e) => { if (!cancelled) fail(e); });
       }
       playerState.set({ ...playerState.get(), phase: 'playing', magnetId: id, fileIndex, error: null });
     })
@@ -366,6 +431,7 @@ function mountPlay({ id, file }) {
 
   return () => {
     cancelled = true;
+    dlGen++;
     for (const off of disposers.splice(0)) {
       try {
         off();
@@ -394,9 +460,22 @@ function mount(r) {
   return mountHome();
 }
 
+async function ensureSw() {
+  try {
+    if (!('serviceWorker' in navigator)) return false;
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) await navigator.serviceWorker.register('/sw.js');
+    return true;
+  } catch { return false; }
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
   // Adapters: backend always; OPFS chunk cache when the browser offers it.
-  adapter = backendAdapter();
+  adapter = buildAdapter(getEngine());
+  // streamTo needs the worker controlling the page, so the very first
+  // browser-engine native play after first install may need one reload —
+  // covered by a Task 7 manual step.
+  void ensureSw();
   try {
     const root = await globalThis.navigator?.storage?.getDirectory?.();
     opfs = opfsAdapter(root ?? null);

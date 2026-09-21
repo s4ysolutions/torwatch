@@ -1,7 +1,7 @@
 // downloadsRow view: ⬇ links for the video file URL and the active
 // subtitle's .srt URL. Pull-based via getUrls (no adapter/fetch use):
 //
-// getUrls() => { videoUrl?: string|null, srtUrl?: string|null, srtLabel?: string }
+// getUrls() => { videoUrl?, videoName?, srtUrl?, srtLabel? }
 //
 // downloadsRow(container, getUrls) => disposeFn
 // downloadsRow(getUrls) => element (caller appends)
@@ -25,11 +25,11 @@ export function downloadsRow(containerOrGet, maybeGet) {
     getUrls = () => ({});
   }
 
-  const { videoUrl = null, srtUrl = null, srtLabel = '.srt' } =
+  const { videoUrl = null, videoName = 'video', srtUrl = null, srtLabel = '.srt' } =
     (typeof getUrls === 'function' ? getUrls() : {}) ?? {};
 
   const links = [];
-  if (videoUrl) links.push(el('a', { href: videoUrl, download: true }, ['⬇ video']));
+  if (videoUrl) links.push(el('a', { href: videoUrl, download: videoName || 'video' }, ['⬇ video']));
   if (srtUrl) links.push(el('a', { href: srtUrl, download: true }, [`⬇ ${srtLabel || '.srt'}`]));
 
   const row = el('div', { class: 'downloads' }, links);

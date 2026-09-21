@@ -24,7 +24,7 @@ export function inputCardView(containerOrProps, maybeProps) {
   } else {
     props = containerOrProps ?? {};
   }
-  const { onMagnet, onTorrentFile, onSubsFile } = props;
+  const { onMagnet, onTorrentFile, onSubsFile, onEngine } = props;
 
   const history = store.ns('torwatch').get('history', []) ?? [];
 
@@ -46,6 +46,15 @@ export function inputCardView(containerOrProps, maybeProps) {
   const torrentInput = el('input', { type: 'file', id: 'torrentFile', accept: '.torrent' });
   const subsInput = el('input', { type: 'file', id: 'subsFile', accept: '.srt,.vtt' });
 
+  const engines = [['browser', 'Browser (default)'], ['server', 'Server']];
+  const currentEngine = store.ns('torwatch').get('engine', 'browser');
+  const engineRow = el('div', { class: 'engine-toggle' }, engines.map(([v, label]) =>
+    el('label', {}, [
+      el('input', { type: 'radio', name: 'engine', value: v, ...(currentEngine === v ? { checked: true } : {}) }),
+      label,
+    ]),
+  ));
+
   const card = el('section', { class: 'card input-card' }, [
     el('label', { for: 'magnet' }, [
       'Magnet link',
@@ -55,6 +64,7 @@ export function inputCardView(containerOrProps, maybeProps) {
     watchBtn,
     el('label', { for: 'torrentFile' }, ['.torrent file', torrentInput]),
     el('label', { for: 'subsFile' }, ['Subtitles (.srt/.vtt)', subsInput]),
+    engineRow,
   ]);
 
   const submit = () => {
@@ -76,6 +86,12 @@ export function inputCardView(containerOrProps, maybeProps) {
     const f = subsInput.files?.[0];
     if (f && typeof onSubsFile === 'function') onSubsFile(f);
   };
+  const onEngineChange = (e) => {
+    const v = e?.target?.value;
+    if ((v === 'browser' || v === 'server') && typeof onEngine === 'function') onEngine(v);
+  };
+  const engineRadios = [...engineRow.querySelectorAll('input[name="engine"]')];
+  for (const r of engineRadios) r.addEventListener('change', onEngineChange);
 
   watchBtn.addEventListener('click', onWatchClick);
   magnetInput.addEventListener('keydown', onMagnetKey);
@@ -91,6 +107,7 @@ export function inputCardView(containerOrProps, maybeProps) {
     recent.removeEventListener('change', onRecentChange);
     torrentInput.removeEventListener('change', onTorrentChange);
     subsInput.removeEventListener('change', onSubsChange);
+    for (const r of engineRadios) r.removeEventListener('change', onEngineChange);
     try {
       if (typeof card.remove === 'function') card.remove();
       else if (container && typeof container.removeChild === 'function') container.removeChild(card);

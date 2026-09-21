@@ -31,6 +31,7 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       const c = ensureClient();
       const t = c.add(magnet, { announce: [...announceList] });
       const id = norm(t.infoHash);
+      errors.delete(id);
       t.on('error', (e) => errors.set(id, e?.message ?? String(e)));
       return { id };
     },
@@ -39,6 +40,7 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       const buf = data instanceof Uint8Array ? data : new Uint8Array(data);
       const t = c.add(buf, { announce: [...announceList] });
       const id = norm(t.infoHash);
+      errors.delete(id);
       t.on('error', (e) => errors.set(id, e?.message ?? String(e)));
       return { id };
     },
@@ -53,6 +55,7 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       return { id: nid, name: t.name ?? '', state: 'fetching-meta', files: [] };
     },
     async deleteMagnet(id) {
+      errors.delete(norm(id));
       try { ensureClient().remove(norm(id), { destroyStore: true }); } catch {}
     },
     searchSubs: typeof searchSubs === 'function' ? searchSubs : async () => { throw new Error('search not configured'); },

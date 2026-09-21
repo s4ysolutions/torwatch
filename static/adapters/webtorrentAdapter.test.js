@@ -83,3 +83,34 @@ test('deleteMagnet removes with destroyStore, unknown id resolves', async () => 
   assert.deepEqual(removed, [['ab'.repeat(20), { destroyStore: true }]]);
   await a.deleteMagnet('unknown-id'); // resolves silently
 });
+
+test('re-add after error clears stale error state', async () => {
+  const client = fakeClient();
+  const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
+  const magnet = 'magnet:?xt=urn:btih:' + 'ab'.repeat(20);
+  const { id } = await a.addMagnet(magnet);
+  client.get(id)._emit('error', new Error('tracker fail'));
+  let info = await a.getMagnet(id);
+  assert.equal(info.state, 'error');
+  await a.deleteMagnet(id);
+  const re = await a.addMagnet(magnet);
+  assert.equal(re.id, id);
+  info = await a.getMagnet(id);
+  assert.equal(info.state, 'fetching-meta');
+  assert.ok(!('error' in info));
+});
+
+test('re-add via addTorrentFile clears stale error state', async () => {
+  const client = fakeClient();
+  const a = webtorrentAdapter({ clientFactory: () => client, searchSubs: async () => ({}) });
+  const { id } = await a.addTorrentFile(new Uint8Array([1, 2, 3]));
+  client.get(id)._emit('error', new Error('bad torrent'));
+  let info = await a.getMagnet(id);
+  assert.equal(info.state, 'error');
+  await a.deleteMagnet(id);
+  const re = await a.addTorrentFile(new Uint8Array([1, 2, 3]));
+  assert.equal(re.id, id);
+  info = await a.getMagnet(id);
+  assert.equal(info.state, 'fetching-meta');
+  assert.ok(!('error' in info));
+});

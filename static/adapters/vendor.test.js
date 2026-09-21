@@ -18,3 +18,8 @@ test('webtorrent vendor bundle is pinned and present', () => {
   assert.ok(firstLine.includes('webtorrent@' + version), 'bundle must carry pinned version header');
   assert.ok(bundle.length > 100000, 'bundle looks truncated');
 });
+
+test('service worker file exists for webtorrent server', () => {
+  const sw = path.join(here, '..', 'sw.js');
+  assert.ok(existsSync(sw), 'static/sw.js missing');
+});

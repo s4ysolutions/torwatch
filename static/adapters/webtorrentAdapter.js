@@ -59,6 +59,53 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       try { ensureClient().remove(norm(id), { destroyStore: true }); } catch {}
     },
     searchSubs: typeof searchSubs === 'function' ? searchSubs : async () => { throw new Error('search not configured'); },
-    // fetchRange / attachNative / downloadFile arrive in Task 4.
+    async fetchRange(id, index, start, end) {
+      const t = withTorrent(id);
+      if (!t) throw new Error('unknown magnet ' + id);
+      const f = (t.files ?? [])[index];
+      if (!f) throw new Error('bad file index ' + index);
+      const stream = f.createReadStream({ start, end });
+      const chunks = [];
+      for await (const c of stream) chunks.push(c instanceof Uint8Array ? c : new Uint8Array(c));
+      const total = chunks.reduce((n, c) => n + c.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) { out.set(c, off); off += c.length; }
+      return out;
+    },
+    async attachNative(id, index, videoEl) {
+      const c = ensureClient();
+      let serverOk = true;
+      if (typeof c.createServer === 'function' && !c._twServer) {
+        try { c._twServer = c.createServer(); } catch { serverOk = false; }
+      }
+      if (!serverOk) throw new Error('native playback unavailable (stream server failed)');
+      const t = withTorrent(id);
+      const f = (t?.files ?? [])[index];
+      if (!f || typeof f.streamTo !== 'function') throw new Error('native playback unavailable');
+      f.streamTo(videoEl);
+      return () => {
+        try { videoEl.pause(); } catch {}
+        try { videoEl.removeAttribute('src'); videoEl.load(); } catch {}
+      };
+    },
+    async downloadFile(id, index) {
+      const t = withTorrent(id);
+      const f = (t?.files ?? [])[index];
+      if (!f) throw new Error('bad file index ' + index);
+      const name = String(f.path ?? f.name ?? `file-${index}`).split('/').pop();
+      const blob = await new Promise((resolve, reject) => {
+        try {
+          if (typeof f.blob === 'function') return f.blob((b) => b ? resolve(b) : reject(new Error('blob failed')));
+          if (typeof f.arrayBuffer === 'function') {
+            return f.arrayBuffer((ab) => {
+              try { resolve(new Blob([ab])); } catch (e) { reject(e); }
+            });
+          }
+          reject(new Error('download unavailable'));
+        } catch (e) { reject(e); }
+      });
+      return { name, blob };
+    },
   };
 }

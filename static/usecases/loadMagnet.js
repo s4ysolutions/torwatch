@@ -54,12 +54,15 @@ export function bindPosition(video, id, fileIndex) {
 // Missing/unknown states count as not-ready (only 'ready' or 'error' end the
 // poll). After watchdogMs without readiness, fires onStall once (default:
 // playerState phase 'waiting' → statusBar "Waiting for peers…") and keeps
-// polling — the watchdog never aborts the torrent.
-export async function pollMagnetReady({ adapter, id, pollMs = POLL_MS, watchdogMs = WATCHDOG_MS, onStall = null }) {
+// polling — the watchdog never aborts the torrent. signal (AbortSignal)
+// ends the poll with an AbortError (e.g. "Try via server" took over).
+export async function pollMagnetReady({ adapter, id, pollMs = POLL_MS, watchdogMs = WATCHDOG_MS, onStall = null, signal = null }) {
   const t0 = Date.now();
   let stalled = false;
   for (;;) {
+    signal?.throwIfAborted();
     const info = await adapter.getMagnet(id);
+    signal?.throwIfAborted();
     if (info.state === 'ready') return info;
     if (info.state === 'error') throw new Error(info.error || 'magnet failed');
     if (!stalled && watchdogMs > 0 && Date.now() - t0 >= watchdogMs) {
@@ -75,14 +78,23 @@ export async function pollMagnetReady({ adapter, id, pollMs = POLL_MS, watchdogM
   }
 }
 
-export async function loadMagnet({ adapter, magnet, pollMs = POLL_MS, watchdogMs = WATCHDOG_MS, onStall = null }) {
+// Magnet for a torrent id (lowercase hex infohash) from the Watch history.
+export function findMagnet(id) {
+  const want = String(id).toLowerCase();
+  return history().get('history', []).find((m) => {
+    const h = /[?&]xt=urn:btih:([^&]+)/i.exec(m)?.[1];
+    return h && h.toLowerCase() === want;
+  }) ?? null;
+}
+
+export async function loadMagnet({ adapter, magnet, pollMs = POLL_MS, watchdogMs = WATCHDOG_MS, onStall = null, signal = null }) {
   playerState.set({ ...playerState.get(), phase: 'loading', error: null });
   const { id: rawId } = await adapter.addMagnet(magnet);
   // Both engines hand back lowercase hex already (anacrolix HexString is
   // `%x` lowercase, WebTorrent infoHash too) — lowercase anyway: no-op for
   // server ids, required for WebTorrent ids.
   const id = String(rawId).toLowerCase();
-  const info = await pollMagnetReady({ adapter, id, pollMs, watchdogMs, onStall });
+  const info = await pollMagnetReady({ adapter, id, pollMs, watchdogMs, onStall, signal });
   const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
   const s = history();
   const prev = s.get('history', []);

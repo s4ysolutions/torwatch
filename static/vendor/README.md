@@ -3,7 +3,10 @@
 - Version: `2.8.5` (pinned, see `VERSION`)
 - Source URL: `https://cdn.jsdelivr.net/npm/webtorrent@2.8.5/dist/webtorrent.min.js`
 - License: MIT (WebTorrent is MIT-licensed; original LICENSE ships upstream)
-- Provides: `window.WebTorrent` global (UMD bundle) for the torrent adapters.
+- Provides: an ES module with a default export (the `WebTorrent` class).
+  `app.js` imports it at boot (`import('./vendor/webtorrent.min.js')`) and
+  sets `globalThis.WebTorrent` for the adapters. Do not load it with a
+  classic `<script>` tag: that is a SyntaxError (`export`).
 
 ## Re-vendor
 

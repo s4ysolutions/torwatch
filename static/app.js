@@ -17,12 +17,13 @@ import { tracks } from './domain/tracks.js';
 import { backendAdapter } from './adapters/backendAdapter.js';
 import { webtorrentAdapter } from './adapters/webtorrentAdapter.js';
 import { store } from './util/store.js';
-import { opfsAdapter } from './adapters/opfsAdapter.js';
+import { opfsAdapter, openCacheDir, CACHE_DIR } from './adapters/opfsAdapter.js';
 import {
   loadMagnet,
   pollMagnetReady,
   pickVideoFile,
   NoPlayableError,
+  findMagnet,
   loadPosition,
   bindPosition,
 } from './usecases/loadMagnet.js';
@@ -52,6 +53,7 @@ const WATCHDOG_MS = 60000;
 
 let adapter = null;
 let opfs = opfsAdapter(null); // upgraded to OPFS dir at boot when available
+let storageRoot = null; // OPFS root (shared with WebTorrent's piece store)
 // Subs file picked on home (no video there yet) → loaded on play mount.
 let pendingSubs = null;
 
@@ -148,17 +150,31 @@ function failWithFiles(e) {
   if (e instanceof NoPlayableError) showFileLinks(e.info);
 }
 
+// The Watch request in flight, so "Try via server" can cancel it and repeat
+// it on the server engine.
+let lastSubmit = null; // { magnet } | { file }
+let submitCtl = null;
+function beginSubmit(req) {
+  submitCtl?.abort();
+  submitCtl = new AbortController();
+  lastSubmit = req;
+  return submitCtl.signal;
+}
+const isAbort = (e) => e?.name === 'AbortError';
+
 async function submitMagnet(magnet) {
+  const signal = beginSubmit({ magnet });
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
-    const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS });
+    const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS, signal });
     go(`#/play/${normId(id)}/${fileIndex}`);
   } catch (e) {
-    failWithFiles(e);
+    if (!isAbort(e)) failWithFiles(e);
   }
 }
 
 async function submitTorrent(file) {
+  const signal = beginSubmit({ file });
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
     const buf = await file.arrayBuffer();
@@ -166,14 +182,52 @@ async function submitTorrent(file) {
     const id = normId(rawId);
     // Same poll contract as loadMagnet: unbounded, 'waiting' after
     // WATCHDOG_MS, breaks only on state === 'ready'.
-    const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS });
+    const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS, signal });
     const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
     playerState.set({ ...playerState.get(), phase: 'ready', magnetId: id, fileIndex, error: null });
     go(`#/play/${id}/${fileIndex}`);
   } catch (e) {
-    failWithFiles(e);
+    if (!isAbort(e)) failWithFiles(e);
   }
 }
+
+// Manual fallback from the browser engine (WebRTC peers only) to the
+// server engine (whole swarm). Never automatic: the user decides.
+function switchToServer() {
+  const prev = adapter;
+  engineStore.set('engine', 'server');
+  adapter = buildAdapter('server');
+  return prev;
+}
+
+// Home: repeat the pending Watch request on the server.
+function retryViaServer() {
+  const req = lastSubmit;
+  if (!req) return;
+  submitCtl?.abort();
+  const prev = switchToServer();
+  void prev.clearAll?.().catch(() => {}); // stop the browser-engine download
+  remount(); // home re-renders with "Server" selected
+  if (req.magnet) void submitMagnet(req.magnet);
+  else void submitTorrent(req.file);
+}
+
+// Player: hand the torrent being played to the server and reopen it there
+// (position is restored from the saved one).
+async function playViaServer(id) {
+  const magnet = findMagnet(id) ?? adapter.magnetUri?.(id) ?? `magnet:?xt=urn:btih:${id}`;
+  const prev = switchToServer();
+  try {
+    await adapter.addMagnet(magnet);
+  } catch (e) {
+    fail(e);
+    return;
+  }
+  void prev.deleteMagnet?.(id)?.catch?.(() => {});
+  remount();
+}
+
+const usingBrowserEngine = () => getEngine() === 'browser' && canUseBrowserEngine();
 
 async function stashSubs(file) {
   try {
@@ -238,7 +292,7 @@ function mountHome() {
     clearBtn.disabled = true;
     try {
       const server = adapter.clearServerCache ? adapter : (buildAdapter._server ??= backendAdapter());
-      const r = await clearEverywhere({ opfs, server, browser: adapter.clearAll ? adapter : null });
+      const r = await clearEverywhere({ opfs, server, browser: adapter.clearAll ? adapter : null, storageRoot, keepName: CACHE_DIR });
       playerState.set({ ...playerState.get(), note: describeClear(r, formatBytes) });
     } catch (e) {
       fail(e);
@@ -249,8 +303,20 @@ function mountHome() {
   });
   host.appendChild(el('div', { class: 'cache-row' }, [cacheText, ' ', clearBtn]));
   void showSize();
+  // While the browser engine looks for (WebRTC) peers: offer the server.
+  const viaServerBtn = el('button', { type: 'button', class: 'via-server' }, 'Try via server');
+  viaServerBtn.addEventListener('click', retryViaServer);
+  const viaServerRow = el('div', { class: 'engine-hint' }, ['No luck with browser peers? ', viaServerBtn]);
+  host.appendChild(viaServerRow);
+  const showViaServer = (s) => {
+    const searching = ['fetching', 'loading', 'waiting'].includes(s?.phase);
+    viaServerRow.style.display = searching && lastSubmit && usingBrowserEngine() ? '' : 'none';
+  };
+  showViaServer(playerState.get());
+  const offViaServer = playerState.subscribe(showViaServer);
   return () => {
     revokeAll(fileLinkUrls);
+    attempt('via-server unsubscribe', offViaServer);
     attempt('home card dispose', dispose);
     clear(host);
   };
@@ -388,6 +454,16 @@ function mountPlay({ id: rawId, file }) {
     }),
   );
 
+  // Browser engine: offer the server when peers are slow or missing.
+  if (usingBrowserEngine()) {
+    const btn = el('button', { type: 'button', class: 'via-server' }, 'Try via server');
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      void playViaServer(id);
+    });
+    stageHost.appendChild(el('div', { class: 'engine-hint' }, ['Slow or stuck? ', btn]));
+  }
+
   // Downloads row: pull-once view, re-rendered on state change.
   let dlDispose = null;
   let srtUrl = null;
@@ -519,6 +595,32 @@ function mount(r) {
   return mountHome();
 }
 
+let teardown = () => {};
+// Tear down the current view and mount the route again (engine switch).
+function remount(r = route.get()) {
+  attempt('route teardown', teardown);
+  try {
+    teardown = mount(r) || (() => {});
+  } catch (e) {
+    teardown = () => {};
+    fail(e);
+  }
+}
+
+// The vendored WebTorrent build is an ES module (`export { … as default }`),
+// so it must be imported, not loaded with a classic <script> (that throws a
+// SyntaxError and leaves the browser engine silently unavailable).
+let webTorrentError = null;
+async function loadWebTorrent() {
+  if (globalThis.WebTorrent) return;
+  try {
+    globalThis.WebTorrent = (await import('./vendor/webtorrent.min.js')).default;
+  } catch (e) {
+    webTorrentError = e;
+    console.warn('torwatch: WebTorrent failed to load', e);
+  }
+}
+
 async function ensureSw() {
   try {
     if (!('serviceWorker' in navigator)) return false;
@@ -530,9 +632,14 @@ async function ensureSw() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   // Adapters: backend always; OPFS chunk cache when the browser offers it.
+  await loadWebTorrent();
   // Force the stored label to the engine actually used so the checked radio
-  // matches (no WebTorrent/WebRTC → server).
-  if (getEngine() === 'browser' && !canUseBrowserEngine()) engineStore.set('engine', 'server');
+  // matches (no WebTorrent/WebRTC → server) — and say so.
+  if (getEngine() === 'browser' && !canUseBrowserEngine()) {
+    engineStore.set('engine', 'server');
+    const why = webTorrentError ? `failed to load (${webTorrentError.message})` : 'needs WebRTC, which this browser lacks';
+    playerState.set({ ...playerState.get(), note: `Browser engine unavailable: ${why} — using the server` });
+  }
   adapter = buildAdapter(getEngine());
   // streamTo needs the worker controlling the page, so the very first
   // browser-engine native play after first install may need one reload —
@@ -540,7 +647,13 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (getEngine() === 'browser') void ensureSw();
   try {
     const root = await globalThis.navigator?.storage?.getDirectory?.();
-    opfs = opfsAdapter(root ?? null);
+    if (root) {
+      const { dir } = await openCacheDir(root);
+      storageRoot = root;
+      opfs = opfsAdapter(dir);
+    } else {
+      opfs = opfsAdapter(null);
+    }
   } catch {
     opfs = opfsAdapter(null);
   }
@@ -567,19 +680,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     fail(e);
   }
 
-  let teardown = () => {};
-  try {
-    teardown = mount(route.get()) || (() => {});
-  } catch (e) {
-    fail(e);
-  }
-  route.subscribe((r) => {
-    attempt('route teardown', teardown);
-    try {
-      teardown = mount(r) || (() => {});
-    } catch (e) {
-      teardown = () => {};
-      fail(e);
-    }
-  });
+  remount();
+  route.subscribe((r) => remount(r));
 });

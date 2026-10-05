@@ -5,7 +5,7 @@ import { opfsAdapter } from '../adapters/opfsAdapter.js';
 import { store } from '../util/store.js';
 import { playerState } from '../domain/playerState.js';
 import { tracks } from '../domain/tracks.js';
-import { loadMagnet, savePosition, loadPosition, bindPosition, pickVideoFile, NoPlayableError } from './loadMagnet.js';
+import { pollMagnetReady, loadMagnet, savePosition, loadPosition, bindPosition, pickVideoFile, NoPlayableError } from './loadMagnet.js';
 import { cachingFetchRange } from './cacheFile.js';
 import { parseSrt, loadSubtitles, addExternalSubs } from './loadSubtitles.js';
 import { switchAudio } from './switchAudio.js';
@@ -325,14 +325,43 @@ test('clearEverywhere clears local, in-browser and server; reports a server fail
   const calls = [];
   const browser = { clearAll: async () => { calls.push('browser'); return 2; } };
   const server = { clearServerCache: async () => { calls.push('server'); return { removed: 3 }; } };
-  const r = await clearEverywhere({ opfs: o, server, browser });
-  assert.deepEqual(r, { localBytes: 2048, browserTorrents: 2, serverTorrents: 3, serverError: null });
-  assert.deepEqual(calls, ['browser', 'server']);
+  // OPFS root: WebTorrent's piece dirs next to the cache dir
+  const rootNames = new Set(['torwatch-cache', 'Some.Movie.2020', 'chunks']);
+  const storageRoot = {
+    async *keys() { yield* [...rootNames]; },
+    async removeEntry(n, opts) { assert.equal(opts?.recursive, true); calls.push(`rm ${n}`); rootNames.delete(n); },
+  };
+  const r = await clearEverywhere({ opfs: o, server, browser, storageRoot, keepName: 'torwatch-cache' });
+  assert.deepEqual(r, { localBytes: 2048, browserTorrents: 2, browserEntries: 2, serverTorrents: 3, serverError: null });
+  assert.deepEqual([...rootNames], ['torwatch-cache'], 'cache dir kept, WebTorrent data gone');
+  assert.deepEqual(calls, ['browser', 'rm Some.Movie.2020', 'rm chunks', 'server'], 'WebTorrent stopped before its files go');
   assert.deepEqual(await o.listIds(), []);
   const fmt = (n) => `${n} B`;
-  assert.equal(describeClear(r, fmt), 'Cleared: local 2048 B, 2 in-browser torrent(s), 3 server torrent(s)');
+  assert.equal(describeClear(r, fmt), 'Cleared: local 2048 B, browser-engine data, 3 server torrent(s)');
   const down = { clearServerCache: async () => { throw new Error('request failed (401)'); } };
   const r2 = await clearEverywhere({ opfs: o, server: down, browser: null });
   assert.equal(r2.serverError, 'request failed (401)');
   assert.match(describeClear(r2, fmt), /server not cleared \(request failed \(401\)\)/);
+});
+
+test('pollMagnetReady stops with AbortError when its signal aborts', async () => {
+  const ctl = new AbortController();
+  let polls = 0;
+  const adapter = { getMagnet: async () => { polls++; return { state: 'fetching-meta' }; } };
+  const p = pollMagnetReady({ adapter, id: 'x', pollMs: 5, watchdogMs: 0, signal: ctl.signal });
+  await new Promise((r) => setTimeout(r, 20));
+  ctl.abort();
+  await assert.rejects(p, { name: 'AbortError' });
+  const n = polls;
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(polls, n, 'no polling after abort');
+});
+
+test('findMagnet returns the history magnet for an infohash', async () => {
+  reset();
+  const { findMagnet } = await import('./loadMagnet.js');
+  const h = '0123456789abcdef0123456789abcdef01234567';
+  store.ns('torwatch').set('history', [`magnet:?dn=x&xt=urn:btih:${h.toUpperCase()}&tr=udp://t`, 'magnet:?xt=urn:btih:ffff']);
+  assert.equal(findMagnet(h), `magnet:?dn=x&xt=urn:btih:${h.toUpperCase()}&tr=udp://t`);
+  assert.equal(findMagnet('deadbeef'), null);
 });

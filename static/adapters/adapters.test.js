@@ -172,13 +172,15 @@ test('opfs memory fallback: 1000 sequential 1KB writes stay fast and correct', a
   }
 });
 
-// Minimal OPFS directory fake: dirs of files, File.slice/text/size.
+// Minimal OPFS fake: a tree of directory handles (getDirectoryHandle,
+// getFileHandle, entries, keys, removeEntry) and file handles (getFile with
+// size/slice/text, truncating createWritable), like the real API.
 function fakeOpfsRoot() {
   const notFound = () => Object.assign(new Error('missing'), { name: 'NotFoundError' });
-  const fileHandle = (store, name) => ({
+  const fileHandle = (files, name) => ({
     kind: 'file',
     async getFile() {
-      const b = store.get(name);
+      const b = files.get(name);
       return {
         size: b.length,
         slice: (a, z) => ({ arrayBuffer: async () => b.slice(a, z).buffer }),
@@ -189,34 +191,38 @@ function fakeOpfsRoot() {
       let data = new Uint8Array(0); // truncating, like the real default
       return {
         async write(c) { const n = new Uint8Array(data.length + c.length); n.set(data); n.set(c, data.length); data = n; },
-        async close() { store.set(name, data); },
+        async close() { files.set(name, data); },
       };
     },
   });
-  const dirHandle = (store) => ({
+  // node: { files: Map<name, bytes>, dirs: Map<name, node> }
+  const dirHandle = (node) => ({
     kind: 'directory',
-    async getFileHandle(name, opts) {
-      if (!store.has(name)) {
-        if (!opts?.create) throw notFound();
-        store.set(name, new Uint8Array(0));
-      }
-      return fileHandle(store, name);
-    },
-    async *entries() { for (const n of store.keys()) yield [n, fileHandle(store, n)]; },
-  });
-  const dirs = new Map();
-  return {
-    dirs,
+    dirs: node.dirs,
     async getDirectoryHandle(name, opts) {
-      if (!dirs.has(name)) {
+      if (!node.dirs.has(name)) {
         if (!opts?.create) throw notFound();
-        dirs.set(name, new Map());
+        node.dirs.set(name, { files: new Map(), dirs: new Map() });
       }
-      return dirHandle(dirs.get(name));
+      return dirHandle(node.dirs.get(name));
     },
-    async removeEntry(name) { if (!dirs.delete(name)) throw notFound(); },
-    async *keys() { yield* dirs.keys(); },
-  };
+    async getFileHandle(name, opts) {
+      if (!node.files.has(name)) {
+        if (!opts?.create) throw notFound();
+        node.files.set(name, new Uint8Array(0));
+      }
+      return fileHandle(node.files, name);
+    },
+    async *entries() {
+      for (const n of node.files.keys()) yield [n, fileHandle(node.files, n)];
+      for (const n of node.dirs.keys()) yield [n, dirHandle(node.dirs.get(n))];
+    },
+    async *keys() { yield* node.files.keys(); yield* node.dirs.keys(); },
+    async removeEntry(name) {
+      if (!node.dirs.delete(name) && !node.files.delete(name)) throw notFound();
+    },
+  });
+  return dirHandle({ files: new Map(), dirs: new Map() });
 }
 
 test('opfs stores one file per chunk and survives a reload', async () => {
@@ -226,7 +232,9 @@ test('opfs stores one file per chunk and survives a reload', async () => {
   await o.write('a:0', 10, new Uint8Array([9]));
   await o.write('a:0', 3, new Uint8Array([4, 5]));
   await o.setEof('a:0', 11);
-  assert.deepEqual([...root.dirs.get('a%3A0').keys()].sort(), ['0', '10', '3', 'eof']);
+  const chunkFiles = [];
+  for await (const n of (await root.getDirectoryHandle('a%3A0')).keys()) chunkFiles.push(n);
+  assert.deepEqual(chunkFiles.sort(), ['0', '10', '3', 'eof']);
   // fresh adapter = page reload: index rebuilt from the directory
   const o2 = opfsAdapter(root);
   assert.deepEqual([...await o2.read('a:0', 0, 4)], [1, 2, 3, 4, 5]);
@@ -270,4 +278,20 @@ test('backend clearServerCache sends DELETE /api/cache', async () => {
   const a = backendAdapter(async (url, opts) => { seen.push([url, opts?.method]); return { ok: true, json: async () => ({ removed: 4 }) }; });
   assert.deepEqual(await a.clearServerCache(), { removed: 4 });
   assert.deepEqual(seen, [['/api/cache', 'DELETE']]);
+});
+
+test('openCacheDir: own directory, old root-level cache entries removed, others kept', async () => {
+  const { openCacheDir, CACHE_DIR } = await import('./opfsAdapter.js');
+  const root = fakeOpfsRoot();
+  const legacy = '0123456789abcdef0123456789abcdef01234567%3A0';
+  for (const n of [legacy, 'Some.Movie.2020']) await root.getDirectoryHandle(n, { create: true });
+  const { dir, legacyRemoved } = await openCacheDir(root);
+  assert.equal(legacyRemoved, 1);
+  assert.deepEqual([...root.dirs.keys()].sort(), ['Some.Movie.2020', CACHE_DIR].sort());
+  // the cache lives inside its directory (real OPFS mode), not in the root
+  const o = opfsAdapter(dir);
+  await o.write('abc:0', 0, new Uint8Array([1, 2]));
+  assert.deepEqual([...root.dirs.keys()].sort(), ['Some.Movie.2020', CACHE_DIR].sort());
+  assert.deepEqual([...dir.dirs.keys()], ['abc%3A0']);
+  assert.deepEqual([...await opfsAdapter(dir).read('abc:0', 0, 1)], [1, 2]); // fresh adapter: from disk
 });

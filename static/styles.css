@@ -72,4 +72,4 @@ font-weight:400;margin:.15rem 0;cursor:pointer}
 .subs-find:hover,.subs-copy:hover,.tracks-btn:hover{background:#221c15}
 .downloads a:not(:first-child):hover{background:#221c15}
 }
-.cache-row{margin-top:.6rem;font-size:.85rem;color:var(--muted);display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+.cache-row,.engine-hint{margin-top:.6rem;font-size:.85rem;color:var(--muted);display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}

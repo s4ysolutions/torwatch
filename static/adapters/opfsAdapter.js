@@ -229,6 +229,27 @@ function opfsFiles(root) {
   };
 }
 
+// The cache lives in its own directory of the origin's OPFS: WebTorrent
+// (browser engine) keeps its pieces in the same OPFS root, and pruning or
+// sizing the cache must never touch those.
+export const CACHE_DIR = 'torwatch-cache';
+// Cache entries of the old layout, directly in the root: `<infohash>:<n>`.
+const LEGACY_ENTRY = /^[0-9a-f]{40}%3A\d+$/i;
+
+// openCacheDir(root) => { dir, legacyRemoved }: the cache directory (created
+// if missing), after removing old-layout cache entries from the root.
+export async function openCacheDir(root) {
+  let legacyRemoved = 0;
+  for await (const name of root.keys()) {
+    if (!LEGACY_ENTRY.test(name)) continue;
+    try {
+      await root.removeEntry(name, { recursive: true });
+      legacyRemoved++;
+    } catch {}
+  }
+  return { dir: await root.getDirectoryHandle(CACHE_DIR, { create: true }), legacyRemoved };
+}
+
 export function opfsAdapter(root) {
   if (root && typeof root.getDirectoryHandle === 'function') return opfsFiles(root);
   return memoryFiles();

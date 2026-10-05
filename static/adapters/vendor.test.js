@@ -24,11 +24,12 @@ test('service worker file exists for webtorrent server', () => {
   assert.ok(existsSync(sw), 'static/sw.js missing');
 });
 
-test('index.html loads vendor bundle before the app module', () => {
+test('the ES-module WebTorrent bundle is imported, never loaded as a classic script', () => {
+  const bundle = readFileSync(path.join(here, '..', 'vendor', 'webtorrent.min.js'), 'utf8');
+  assert.match(bundle, /export\s*\{\s*\w+ as default\s*\}/, 'bundle is an ES module with a default export');
   const html = readFileSync(path.join(here, '..', 'index.html'), 'utf8');
-  const vendorIdx = html.indexOf('vendor/webtorrent.min.js');
-  const appIdx = html.indexOf('./app.js');
-  assert.ok(vendorIdx !== -1, 'index.html must reference vendor/webtorrent.min.js');
-  assert.ok(appIdx !== -1, 'index.html must reference ./app.js');
-  assert.ok(vendorIdx < appIdx, 'vendor bundle must load before the app module');
+  // A classic <script src=…webtorrent…> throws "Unexpected token 'export'".
+  assert.doesNotMatch(html, /<script(?![^>]*type="module")[^>]*webtorrent\.min\.js/, 'no classic script tag for the bundle');
+  const app = readFileSync(path.join(here, '..', 'app.js'), 'utf8');
+  assert.match(app, /import\('\.\/vendor\/webtorrent\.min\.js'\)/, 'app.js imports the bundle');
 });

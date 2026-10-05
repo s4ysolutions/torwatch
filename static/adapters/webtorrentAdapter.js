@@ -57,6 +57,10 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       hookErrors(t, id);
       return { id };
     },
+    // Magnet URI WebTorrent built for id (infohash + trackers), or null.
+    magnetUri(id) {
+      return withTorrent(id)?.magnetURI ?? null;
+    },
     async getMagnet(id) {
       const nid = norm(id);
       const t = withTorrent(nid);
@@ -67,8 +71,8 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       }
       return { id: nid, name: t.name ?? '', state: 'fetching-meta', files: [] };
     },
-    // Drop every torrent in this tab's WebTorrent client (pieces live in
-    // memory) → number removed.
+    // Drop every torrent in this tab's WebTorrent client and its stored
+    // pieces (WebTorrent keeps them in OPFS) → number removed.
     async clearAll() {
       if (!client) return 0;
       const ids = (client.torrents ?? []).map((t) => norm(t.infoHash));

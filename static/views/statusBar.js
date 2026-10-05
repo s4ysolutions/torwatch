@@ -24,7 +24,10 @@ function paint(node, s) {
   const t = textFor(s);
   node.textContent = t;
   node.classList.toggle('busy', isBusy(s?.phase));
-  node.style.display = t ? '' : 'none';
+  // NB: index.html sets `#status{display:none}`. The bar node itself carries
+  // id="status", so clearing the inline style ('') falls back to that rule
+  // and the bar stays hidden even with text. Use 'block' to override it.
+  node.style.display = t ? 'block' : 'none';
 }
 
 function isEmitter(x) {

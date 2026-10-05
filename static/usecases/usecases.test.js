@@ -365,3 +365,13 @@ test('findMagnet returns the history magnet for an infohash', async () => {
   assert.equal(findMagnet(h), `magnet:?dn=x&xt=urn:btih:${h.toUpperCase()}&tr=udp://t`);
   assert.equal(findMagnet('deadbeef'), null);
 });
+
+test('describeSource shows actual amounts', async () => {
+  const { describeSource } = await import('./cacheFile.js');
+  const MB = 1 << 20;
+  assert.equal(describeSource({ cache: 0, network: 0 }, 'server'), null);
+  assert.equal(describeSource({ cache: 0, network: 120 * MB }, 'server'), 'Downloaded via server: 120.0 MB');
+  assert.equal(describeSource({ cache: 1.5 * 1024 * MB, network: 120 * MB }, 'browser peers'),
+    'Downloaded via browser peers: 120.0 MB · from local cache: 1.50 GB');
+  assert.equal(describeSource({ cache: 300 * 1024, network: 0 }, 'server'), 'Playing from local cache (300 KB read)');
+});

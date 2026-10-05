@@ -28,7 +28,8 @@ import {
   bindPosition,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
-import { cachingFetchRange, pruneCache, cacheSize } from './usecases/cacheFile.js';
+import { cachingFetchRange, pruneCache, cacheSize, describeSource } from './usecases/cacheFile.js';
+import { formatBytes } from './util/format.js';
 import { clearEverywhere, describeClear } from './usecases/clearEverywhere.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
@@ -322,11 +323,6 @@ function mountHome() {
   };
 }
 
-function formatBytes(n) {
-  if (n < 1 << 20) return `${Math.round(n / 1024)} KB`;
-  if (n < 1 << 30) return `${(n / (1 << 20)).toFixed(1)} MB`;
-  return `${(n / (1 << 30)).toFixed(2)} GB`;
-}
 
 function mountPlay({ id: rawId, file }) {
   const id = rawId == null ? rawId : normId(rawId);
@@ -342,13 +338,8 @@ function mountPlay({ id: rawId, file }) {
   const showSource = () => {
     sourceTimer = null;
     if (cancelled) return;
-    const total = bytesFrom.cache + bytesFrom.network;
-    if (!total) return;
-    const pct = Math.round((bytesFrom.cache / total) * 100);
-    const note = pct === 100
-      ? 'Playing from local cache'
-      : pct === 0 ? `Streaming via ${engineLabel}` : `Data: ${pct}% local cache, ${100 - pct}% ${engineLabel}`;
-    if (playerState.get().note !== note) playerState.set({ ...playerState.get(), note });
+    const note = describeSource(bytesFrom, engineLabel);
+    if (note && playerState.get().note !== note) playerState.set({ ...playerState.get(), note });
   };
   const countSource = (source, n) => {
     bytesFrom[source] += n;

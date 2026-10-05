@@ -1,5 +1,17 @@
 import { playerState } from '../domain/playerState.js';
 import { store } from '../util/store.js';
+import { formatBytes } from '../util/format.js';
+
+// Status text for the bytes the player has read since the video opened:
+// { cache, network } byte counts; engine names where network bytes came
+// from ('server' / 'browser peers'). Cache bytes include re-reads (after a
+// seek, an audio switch), network bytes are what was actually downloaded.
+export function describeSource({ cache, network }, engine) {
+  if (!cache && !network) return null;
+  if (!network) return `Playing from local cache (${formatBytes(cache)} read)`;
+  const dl = `Downloaded via ${engine}: ${formatBytes(network)}`;
+  return cache ? `${dl} · from local cache: ${formatBytes(cache)}` : dl;
+}
 
 // Last use per cache key (ms), for pruneCache: { [key]: ms }.
 const usage = () => store.ns('torwatch');

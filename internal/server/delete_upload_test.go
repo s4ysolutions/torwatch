@@ -17,7 +17,7 @@ var testTorrentBytes = []byte("d4:infod6:lengthi5e4:name8:test.txt12:piece lengt
 
 func newServerWithManager(t *testing.T) (*Server, *torrents.Manager) {
 	t.Helper()
-	m, err := torrents.NewManager(t.TempDir())
+	m, err := torrents.NewManager(t.TempDir(), torrents.Options{ListenPort: -1})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

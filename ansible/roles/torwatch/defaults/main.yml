@@ -34,3 +34,6 @@ enable_ssl: true
 
 # ---- Secrets (supplied by caller, empty = disabled) ----
 vault_opensubs_key: ""
+# "user:password" for HTTP Basic auth on everything but /api/health.
+# Empty leaves the site open: anyone can make the VPS fetch any torrent.
+vault_torwatch_auth: ""

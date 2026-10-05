@@ -1,6 +1,7 @@
 package torrents
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -91,7 +92,7 @@ func TestFileReaderTouchesLastUsed(t *testing.T) {
 	fc.releaseInfo()
 	old := time.Now().Add(-2 * time.Hour)
 	m.setLastUsed(id, old)
-	rc, _, err := m.FileReader(id, 0)
+	rc, _, err := m.FileReader(context.Background(), id, 0)
 	if err != nil {
 		t.Fatalf("FileReader: %v", err)
 	}

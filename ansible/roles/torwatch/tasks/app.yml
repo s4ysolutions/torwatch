@@ -72,5 +72,6 @@
     mode: "0640"
     content: |
       OPENSUBTITLES_API_KEY={{ vault_opensubs_key }}
+      TORWATCH_AUTH={{ vault_torwatch_auth }}
   no_log: true
   notify: Restart torwatch

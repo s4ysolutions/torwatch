@@ -2,6 +2,7 @@ package torrents
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,7 +31,7 @@ type nopSeekCloser struct{ io.ReadSeeker }
 
 func (nopSeekCloser) Close() error { return nil }
 
-func (f *fakeTorrent) FileReader(index int) (io.ReadSeekCloser, int64, error) {
+func (f *fakeTorrent) FileReader(_ context.Context, index int) (io.ReadSeekCloser, int64, error) {
 	if index < 0 || index >= len(f.files) {
 		return nil, 0, fmt.Errorf("%w: bad file index %d", ErrNotFound, index)
 	}
@@ -155,7 +156,7 @@ func TestAddBadMagnet(t *testing.T) {
 func TestFileReaderUnknownMagnet(t *testing.T) {
 	m := NewManagerWithClient(newFakeClient(), t.TempDir())
 	defer m.Close()
-	if _, _, err := m.FileReader("deadbeef", 0); !errors.Is(err, ErrNotFound) {
+	if _, _, err := m.FileReader(context.Background(), "deadbeef", 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
 }
@@ -167,7 +168,53 @@ func TestFileReaderBadIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
-	if _, _, err := m.FileReader(id, 99); !errors.Is(err, ErrNotFound) {
+	if _, _, err := m.FileReader(context.Background(), id, 99); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
 	}
+}
+
+func TestMetaTimeoutMarksErrorAndReAddRetries(t *testing.T) {
+	fc := newFakeClient()
+	m := NewManagerWithClient(fc, t.TempDir())
+	m.metaTimeout = 20 * time.Millisecond
+	id, err := m.Add(testMagnet)
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	info := waitState(t, m, id, "error")
+	if info.Error == "" {
+		t.Fatalf("error state without message: %+v", info)
+	}
+	// Retrying the same magnet starts over instead of returning the failure.
+	m.metaTimeout = time.Hour
+	if _, err := m.Add(testMagnet); err != nil {
+		t.Fatalf("re-Add: %v", err)
+	}
+	if got := waitState(t, m, id, "fetching-meta"); got.Error != "" {
+		t.Fatalf("stale error after re-add: %+v", got)
+	}
+	fc.mu.Lock()
+	calls := fc.addCalls
+	fc.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("addCalls = %d, want 2", calls)
+	}
+	fc.releaseInfo()
+	waitState(t, m, id, "ready")
+}
+
+func TestAddTorrentFileSharesAddPath(t *testing.T) {
+	fc := newFakeClient()
+	m := NewManagerWithClient(fc, t.TempDir())
+	data := []byte("d4:infod6:lengthi5e4:name8:test.txt12:piece lengthi16384e6:pieces20:AAAAAAAAAAAAAAAAAAAAee")
+	a, err := m.AddTorrentFile(data)
+	if err != nil {
+		t.Fatalf("AddTorrentFile: %v", err)
+	}
+	b, _ := m.AddTorrentFile(data)
+	if a != b {
+		t.Fatalf("ids differ: %s %s", a, b)
+	}
+	fc.releaseInfo()
+	waitState(t, m, a, "ready")
 }

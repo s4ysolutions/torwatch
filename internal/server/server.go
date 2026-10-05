@@ -1,10 +1,13 @@
 package server
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"torwatch/internal/torrents"
@@ -16,12 +19,16 @@ type fileManager interface {
 	AddTorrentFile(data []byte) (string, error)
 	Remove(id string) error
 	Info(id string) (torrents.MagnetInfo, error)
-	FileReader(id string, index int) (io.ReadSeekCloser, int64, error)
+	FileReader(ctx context.Context, id string, index int) (io.ReadSeekCloser, int64, error)
 }
 
 // Opts configures optional Server integrations.
 type Opts struct {
 	OpensubsKey string
+	// Auth "user:password" puts everything except /api/health behind HTTP
+	// Basic auth (the browser prompts once; <video> and fetch reuse it).
+	// Empty = open server.
+	Auth string
 }
 
 // Server is the HTTP handler.
@@ -31,6 +38,8 @@ type Server struct {
 	opensubsKey  string
 	opensubsBase string
 	httpClient   *http.Client
+	// tests serve the temporary download link over plain http
+	allowHTTPLinks bool
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.h.ServeHTTP(w, r) }
@@ -125,7 +134,30 @@ func newServer(staticDir string, m fileManager, opts Opts) *Server {
 		})
 		mux.HandleFunc("GET /api/magnets/{id}/files/{index}", s.handleStream)
 	}
+	mux.HandleFunc("GET /api/opensubs/download", s.handleOpensubsDownload)
 	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
-	s.h = mux
+	s.h = withBasicAuth(opts.Auth, mux)
 	return s
+}
+
+func withBasicAuth(cred string, next http.Handler) http.Handler {
+	if cred == "" {
+		return next
+	}
+	user, pass, _ := strings.Cut(cred, ":")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		u, p, ok := r.BasicAuth()
+		if !ok ||
+			subtle.ConstantTimeCompare([]byte(u), []byte(user)) != 1 ||
+			subtle.ConstantTimeCompare([]byte(p), []byte(pass)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="torwatch", charset="UTF-8"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

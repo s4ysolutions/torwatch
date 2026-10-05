@@ -36,7 +36,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad index", http.StatusBadRequest)
 		return
 	}
-	rs, _, err := s.mgr.FileReader(id, idx)
+	rs, _, err := s.mgr.FileReader(r.Context(), id, idx)
 	if errors.Is(err, torrents.ErrNotFound) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return

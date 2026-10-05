@@ -2,10 +2,12 @@ package torrents
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/anacrolix/torrent"
@@ -37,7 +39,7 @@ type torrentIface interface {
 	Files() []FileInfo
 	Name() string
 	Drop()
-	FileReader(index int) (io.ReadSeekCloser, int64, error)
+	FileReader(ctx context.Context, index int) (io.ReadSeekCloser, int64, error)
 }
 
 // clientIface mirrors the *torrent.Client methods Manager uses.
@@ -63,14 +65,19 @@ func (r *realTorrent) Files() []FileInfo {
 
 // FileReader opens a seekable reader for file index. The anacrolix Reader
 // prioritizes pieces near the read offset, so playback never waits for the
-// full file.
-func (r *realTorrent) FileReader(index int) (io.ReadSeekCloser, int64, error) {
+// full file. Responsive: return what is available instead of filling the
+// whole buffer. ctx (the HTTP request) unblocks a read waiting for pieces
+// once the client goes away.
+func (r *realTorrent) FileReader(ctx context.Context, index int) (io.ReadSeekCloser, int64, error) {
 	files := r.t.Files()
 	if index < 0 || index >= len(files) {
 		return nil, 0, fmt.Errorf("%w: bad file index %d", ErrNotFound, index)
 	}
 	f := files[index]
-	return f.NewReader(), f.Length(), nil
+	rd := f.NewReader()
+	rd.SetContext(ctx)
+	rd.SetResponsive()
+	return rd, f.Length(), nil
 }
 
 type realClient struct{ c *torrent.Client }
@@ -96,79 +103,86 @@ func (r *realClient) Close() { r.c.Close() }
 type entry struct {
 	t        torrentIface
 	state    string
+	err      string
 	files    []FileInfo
 	name     string
 	lastUsed time.Time
+	gone     chan struct{} // closed when the entry leaves the map
 }
+
+// DefaultMetaTimeout bounds the wait for torrent metadata (no peers).
+const DefaultMetaTimeout = 10 * time.Minute
 
 // Manager tracks magnets by infohash hex. Add is idempotent on infohash.
 type Manager struct {
-	mu      sync.Mutex
-	client  clientIface
-	byID    map[string]*entry
-	dataDir string
-	dirSize func(string) (int64, error)
+	mu          sync.Mutex
+	client      clientIface
+	byID        map[string]*entry
+	dataDir     string
+	dirSize     func(string) (int64, error)
+	metaTimeout time.Duration
 }
 
 // NewManagerWithClient builds a Manager over c (tests inject a fake).
 func NewManagerWithClient(c clientIface, dataDir string) *Manager {
-	return &Manager{client: c, byID: make(map[string]*entry), dataDir: dataDir, dirSize: dirSizeWalk}
+	return &Manager{
+		client:      c,
+		byID:        make(map[string]*entry),
+		dataDir:     dataDir,
+		dirSize:     dirSizeWalk,
+		metaTimeout: DefaultMetaTimeout,
+	}
+}
+
+// Options configures the real torrent client.
+type Options struct {
+	// Upload lets peers download from this host while a torrent is active.
+	// Off by default: the server then only leeches (never seeds after
+	// completion either), which limits bandwidth and legal exposure at the
+	// cost of slower swarms that reward reciprocity.
+	Upload bool
+	// ListenPort for BitTorrent peers; 0 = anacrolix default (42069),
+	// negative = any free port (tests).
+	ListenPort int
+	// MetaTimeout: a torrent without metadata after this long is marked
+	// "error". 0 = DefaultMetaTimeout.
+	MetaTimeout time.Duration
 }
 
 // NewManager builds a Manager over a real anacrolix client.
-func NewManager(dataDir string) (*Manager, error) {
+func NewManager(dataDir string, opts Options) (*Manager, error) {
 	cfg := torrent.NewDefaultClientConfig()
 	cfg.DataDir = dataDir
+	cfg.NoUpload = !opts.Upload
+	cfg.Seed = false
+	if opts.ListenPort > 0 {
+		cfg.ListenPort = opts.ListenPort
+	} else if opts.ListenPort < 0 {
+		cfg.ListenPort = 0
+	}
 	c, err := torrent.NewClient(cfg)
+	if err != nil && errors.Is(err, syscall.EAFNOSUPPORT) {
+		// Host without IPv6: the tcp6/udp6 listeners can't be created.
+		cfg.DisableIPv6 = true
+		c, err = torrent.NewClient(cfg)
+	}
 	if err != nil {
 		return nil, err
 	}
-	return NewManagerWithClient(&realClient{c: c}, dataDir), nil
+	m := NewManagerWithClient(&realClient{c: c}, dataDir)
+	if opts.MetaTimeout > 0 {
+		m.metaTimeout = opts.MetaTimeout
+	}
+	return m, nil
 }
 
 // Add parses magnet, returns infohash hex. Same magnet twice → same id.
-// The client call runs outside m.mu; the map is re-checked after
-// (double-checked) so a concurrent Add for the same id wins once and the
-// duplicate handle is dropped.
 func (m *Manager) Add(magnet string) (string, error) {
 	spec, err := torrent.TorrentSpecFromMagnetUri(magnet)
 	if err != nil {
 		return "", err
 	}
-	id := spec.InfoHash.HexString()
-	m.mu.Lock()
-	if e, ok := m.byID[id]; ok {
-		e.lastUsed = time.Now()
-		m.mu.Unlock()
-		return id, nil
-	}
-	m.mu.Unlock()
-	t, err := m.client.AddMagnet(magnet)
-	if err != nil {
-		return "", err
-	}
-	m.mu.Lock()
-	if e, ok := m.byID[id]; ok {
-		e.lastUsed = time.Now()
-		m.mu.Unlock()
-		t.Drop() // duplicate handle; keep the registered one
-		return id, nil
-	}
-	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
-	m.byID[id] = e
-	m.mu.Unlock()
-	go func() {
-		<-t.GotInfo()
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if cur, ok := m.byID[id]; !ok || cur != e {
-			return // evicted (or replaced) while fetching meta
-		}
-		e.state = "ready"
-		e.files = t.Files()
-		e.name = t.Name()
-	}()
-	return id, nil
+	return m.add(spec.InfoHash.HexString(), func() (torrentIface, error) { return m.client.AddMagnet(magnet) })
 }
 
 // AddTorrentFile parses raw .torrent bytes, returns infohash hex.
@@ -178,16 +192,29 @@ func (m *Manager) AddTorrentFile(data []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	id := mi.HashInfoBytes().HexString()
+	return m.add(mi.HashInfoBytes().HexString(), func() (torrentIface, error) { return m.client.AddTorrent(mi) })
+}
+
+// add registers id, opening the client handle only when id is new. The
+// client call runs outside m.mu; the map is re-checked after
+// (double-checked) so a concurrent add for the same id wins once and the
+// duplicate handle is dropped. An entry in "error" state is evicted and
+// re-added, so retrying a stalled magnet starts over.
+func (m *Manager) add(id string, open func() (torrentIface, error)) (string, error) {
 	m.mu.Lock()
-	if e, ok := m.byID[id]; ok {
+	e, ok := m.byID[id]
+	failed := ok && e.state == "error"
+	if ok && !failed {
 		e.lastUsed = time.Now()
-		m.mu.Unlock()
-		return id, nil
 	}
 	m.mu.Unlock()
-	// Client I/O outside the lock; re-check after (double-checked).
-	t, err := m.client.AddTorrent(mi)
+	if ok && !failed {
+		return id, nil
+	}
+	if failed {
+		m.evict(id)
+	}
+	t, err := open()
 	if err != nil {
 		return "", err
 	}
@@ -198,21 +225,39 @@ func (m *Manager) AddTorrentFile(data []byte) (string, error) {
 		t.Drop() // duplicate handle; keep the registered one
 		return id, nil
 	}
-	e := &entry{t: t, state: "fetching-meta", lastUsed: time.Now()}
+	e = &entry{t: t, state: "fetching-meta", lastUsed: time.Now(), gone: make(chan struct{})}
 	m.byID[id] = e
+	timeout := m.metaTimeout
 	m.mu.Unlock()
-	go func() {
-		<-t.GotInfo()
+	go m.awaitInfo(id, e, timeout)
+	return id, nil
+}
+
+// awaitInfo flips e to "ready" once metadata arrives, or "error" after
+// timeout; returns early when e is evicted (no goroutine outlives it).
+func (m *Manager) awaitInfo(id string, e *entry, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-e.gone:
+		return
+	case <-timer.C:
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cur, ok := m.byID[id]; ok && cur == e && e.state == "fetching-meta" {
+			e.state = "error"
+			e.err = fmt.Sprintf("no metadata after %s (no reachable peers?)", timeout)
+		}
+	case <-e.t.GotInfo():
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		if cur, ok := m.byID[id]; !ok || cur != e {
 			return // evicted (or replaced) while fetching meta
 		}
 		e.state = "ready"
-		e.files = t.Files()
-		e.name = t.Name()
-	}()
-	return id, nil
+		e.files = e.t.Files()
+		e.name = e.t.Name()
+	}
 }
 
 // Info returns current state for id.
@@ -227,12 +272,12 @@ func (m *Manager) Info(id string) (MagnetInfo, error) {
 	if files == nil {
 		files = []FileInfo{}
 	}
-	return MagnetInfo{ID: id, Name: e.name, State: e.state, Files: files}, nil
+	return MagnetInfo{ID: id, Name: e.name, State: e.state, Error: e.err, Files: files}, nil
 }
 
-// FileReader returns a seekable reader for file index of id.
+// FileReader returns a seekable reader for file index of id, bound to ctx.
 // Touches lastUsed so retention treats playback as use.
-func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, error) {
+func (m *Manager) FileReader(ctx context.Context, id string, index int) (io.ReadSeekCloser, int64, error) {
 	m.mu.Lock()
 	e, ok := m.byID[id]
 	if ok {
@@ -242,7 +287,7 @@ func (m *Manager) FileReader(id string, index int) (io.ReadSeekCloser, int64, er
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: unknown magnet %q", ErrNotFound, id)
 	}
-	return e.t.FileReader(index)
+	return e.t.FileReader(ctx, index)
 }
 
 // Remove drops id from the client. Unknown id → ErrNotFound.

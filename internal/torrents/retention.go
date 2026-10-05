@@ -96,6 +96,9 @@ func (m *Manager) planRemoveLocked(id string) (torrentIface, []string, bool) {
 		name = e.name
 	}
 	delete(m.byID, id)
+	if e.gone != nil {
+		close(e.gone)
+	}
 	return e.t, storagePaths(m.dataDir, id, name), true
 }
 

@@ -7,7 +7,8 @@ Split: this repo holds portable deploy logic only (`roles/torwatch`: task
 list, package names, templates). Real target + secrets live in
 `~/s4y/oci/ansible`: inventory (`torwatch-prod` = vps1), ssh user/key, and
 vault file `host_vars/torwatch-prod/vault.yml` with `vault_opensubs_key`
-(optional — empty default disables OpenSubtitles). Run the deploy from there
+(optional — empty default disables OpenSubtitles) and `vault_torwatch_auth`
+(`user:password` for HTTP Basic auth; empty leaves the site open). Run the deploy from there
 (`playbooks/torwatch.yml`).
 
 ## What the role does

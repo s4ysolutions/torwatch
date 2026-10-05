@@ -7,8 +7,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"torwatch/internal/server"
 	"torwatch/internal/torrents"
@@ -50,16 +52,53 @@ func main() {
 	dataDir := flag.String("data", "data", "torrent data dir")
 	ttl := flag.Duration("ttl", 24*time.Hour, "idle TTL before a torrent is evicted")
 	maxDiskStr := flag.String("max-disk", "20GB", "disk budget for data dir (e.g. 20GB, 512MB)")
+	upload := flag.Bool("upload", false, "upload to peers while downloading (off: leech only)")
+	peerPort := flag.Int("peer-port", 0, "BitTorrent listen port (0 = 42069)")
+	metaTimeout := flag.Duration("meta-timeout", torrents.DefaultMetaTimeout, "give up on a torrent without metadata after this long")
 	flag.Parse()
 	maxDisk, err := parseBytes(*maxDiskStr)
 	if err != nil {
 		log.Fatalf("bad -max-disk: %v", err)
 	}
-	m, err := torrents.NewManager(*dataDir)
-	if err != nil {
+	if err := run(*addr, *staticDir, *dataDir, *ttl, maxDisk, torrents.Options{
+		Upload:      *upload,
+		ListenPort:  *peerPort,
+		MetaTimeout: *metaTimeout,
+	}); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// run serves until SIGINT/SIGTERM, then drains HTTP and closes the torrent
+// client (so it can flush state and release its port).
+func run(addr, staticDir, dataDir string, ttl time.Duration, maxDisk int64, opts torrents.Options) error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	m, err := torrents.NewManager(dataDir, opts)
+	if err != nil {
+		return err
+	}
 	defer m.Close()
-	go m.StartCleanup(context.Background(), *ttl, maxDisk, 10*time.Minute)
-	log.Fatal(http.ListenAndServe(*addr, server.New(*staticDir, m, server.Opts{OpensubsKey: os.Getenv("OPENSUBTITLES_API_KEY")})))
+	go m.StartCleanup(ctx, ttl, maxDisk, 10*time.Minute)
+	srv := &http.Server{
+		Addr: addr,
+		Handler: server.New(staticDir, m, server.Opts{
+			OpensubsKey: os.Getenv("OPENSUBTITLES_API_KEY"),
+			Auth:        os.Getenv("TORWATCH_AUTH"), // "user:password"; empty = open
+		}),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		// No WriteTimeout: video responses stream for as long as playback.
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	log.Print("shutting down")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutCtx)
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +32,7 @@ func (f *fakeFileManager) Info(id string) (torrents.MagnetInfo, error) {
 	return torrents.MagnetInfo{ID: id, Files: f.files}, nil
 }
 
-func (f *fakeFileManager) FileReader(id string, index int) (io.ReadSeekCloser, int64, error) {
+func (f *fakeFileManager) FileReader(_ context.Context, id string, index int) (io.ReadSeekCloser, int64, error) {
 	if f.err != nil {
 		return nil, 0, f.err
 	}

@@ -71,3 +71,32 @@ func TestGetMagnetNotFound(t *testing.T) {
 		t.Fatalf("got %d %q", r.Code, r.Body.String())
 	}
 }
+
+func TestBasicAuthGuardsAllButHealth(t *testing.T) {
+	srv := newServer(t.TempDir(), &fakeFileManager{data: []byte("x")}, Opts{Auth: "u:p4ss"})
+	cases := []struct {
+		path       string
+		user, pass string
+		want       int
+	}{
+		{"/api/health", "", "", 200},
+		{"/api/magnets/x/files/0", "", "", 401},
+		{"/", "", "", 401},
+		{"/api/magnets/x/files/0", "u", "wrong", 401},
+		{"/api/magnets/x/files/0", "u", "p4ss", 200},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest("GET", c.path, nil)
+		if c.user != "" {
+			req.SetBasicAuth(c.user, c.pass)
+		}
+		r := httptest.NewRecorder()
+		srv.ServeHTTP(r, req)
+		if r.Code != c.want {
+			t.Fatalf("%s as %q: got %d want %d", c.path, c.user, r.Code, c.want)
+		}
+		if c.want == 401 && r.Header().Get("WWW-Authenticate") == "" {
+			t.Fatalf("%s: 401 without challenge", c.path)
+		}
+	}
+}

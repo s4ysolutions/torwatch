@@ -48,3 +48,13 @@ export function nextFile(files, index) {
   const i = list.findIndex((f) => f.index === index);
   return i >= 0 && i + 1 < list.length ? list[i + 1] : null;
 }
+
+// Which episode "Continue" points at: the last one played, or — when that
+// was watched to the end — the one after it (itself if it was the last).
+// null when nothing was played yet or the file is gone.
+export function continueTarget(files, lastIndex, lastFinished) {
+  const list = playableFiles(files);
+  const last = list.find((f) => f.index === lastIndex);
+  if (!last) return null;
+  return lastFinished ? nextFile(files, lastIndex) ?? last : last;
+}

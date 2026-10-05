@@ -3,12 +3,14 @@
 // resume marker for started ones.
 //
 // filePickerView(container, { name, files, positionOf(index) => sec,
-//   watchedOf(index) => bool, hrefFor(index) => string, otherCount })
-//   => disposeFn
+//   watchedOf(index) => bool, hrefFor(index) => string, otherCount,
+//   lastIndex?, continueIndex? }) => disposeFn
+// lastIndex marks (and scrolls to) the last played episode; continueIndex
+// adds a "Continue" link at the top.
 
 import { el } from '../util/dom.js';
 import { formatBytes } from '../util/format.js';
-import { groupByFolder, baseName } from '../domain/files.js';
+import { groupByFolder, baseName, playableFiles } from '../domain/files.js';
 
 const clock = (sec) => {
   const s = Math.floor(sec);
@@ -19,7 +21,10 @@ const clock = (sec) => {
 };
 
 export function filePickerView(container, props) {
-  const { name = '', files = [], positionOf = () => 0, watchedOf = () => false, hrefFor, otherCount = 0 } = props ?? {};
+  const {
+    name = '', files = [], positionOf = () => 0, watchedOf = () => false, hrefFor, otherCount = 0,
+    lastIndex = null, continueIndex = null,
+  } = props ?? {};
   const groups = groupByFolder(files);
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   const body = [
@@ -27,15 +32,28 @@ export function filePickerView(container, props) {
     el('h2', { class: 'picker-title' }, name || 'Choose a video'),
     el('div', { class: 'picker-meta' }, `${total} videos${otherCount ? ` · ${otherCount} other files` : ''}`),
   ];
+  const cont = continueIndex == null ? null : playableFiles(files).find((f) => f.index === continueIndex);
+  if (cont) {
+    const pos = positionOf(cont.index);
+    body.push(el('div', { class: 'picker-continue' }, [
+      el('a', { href: hrefFor(cont.index) }, `▶ Continue: ${baseName(cont.path)}`),
+      pos > 0 ? el('span', { class: 'picker-resume' }, ` · from ${clock(pos)}`) : null,
+    ]));
+  }
+  let lastRow = null;
   for (const g of groups) {
     const items = g.files.map((f) => {
       const pos = positionOf(f.index);
-      return el('li', {}, [
+      const isLast = f.index === lastIndex;
+      const row = el('li', isLast ? { class: 'picker-last' } : {}, [
         el('a', { href: hrefFor(f.index), class: 'picker-file' }, baseName(f.path)),
         el('span', { class: 'picker-size' }, ` ${formatBytes(f.size ?? 0)}`),
         pos > 0 ? el('span', { class: 'picker-resume' }, ` · resume at ${clock(pos)}`) : null,
         pos <= 0 && watchedOf(f.index) ? el('span', { class: 'picker-resume' }, ' · ✓ watched') : null,
+        isLast ? el('span', { class: 'picker-resume' }, ' · last watched') : null,
       ]);
+      if (isLast) lastRow = row;
+      return row;
     });
     body.push(el('section', { class: 'picker-group' }, [
       g.folder ? el('h3', {}, g.folder) : null,
@@ -44,5 +62,9 @@ export function filePickerView(container, props) {
   }
   const root = el('div', { class: 'picker' }, body);
   container.appendChild(root);
+  // A long season pack: bring the last watched episode into view.
+  try {
+    lastRow?.scrollIntoView?.({ block: 'center' });
+  } catch {}
   return () => root.remove();
 }

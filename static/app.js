@@ -28,9 +28,11 @@ import {
   bindPosition,
   markWatched,
   isWatched,
+  setLastPlayed,
+  getLastPlayed,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
-import { playableFiles, nextFile, baseName } from './domain/files.js';
+import { playableFiles, nextFile, baseName, continueTarget } from './domain/files.js';
 import { filePickerView } from './views/filePickerView.js';
 import { armAutoNext } from './usecases/autoNext.js';
 
@@ -538,6 +540,7 @@ function mountPlay({ id: rawId, file }) {
       fileName = String(name).split('/').pop() || fileName;
       // Season packs: back to the list, and on to the next episode.
       if (playableFiles(info.files).length > 1) {
+        setLastPlayed(id, fileIndex);
         const next = nextFile(info.files, fileIndex);
         const nextHref = next ? `#/play/${id}/${next.index}` : null;
         const countdown = el('span', { class: 'next-countdown' });
@@ -657,7 +660,11 @@ function mountFiles({ id: rawId }) {
       const all = info.files ?? [];
       const playable = playableFiles(all);
       if (!playable.length) throw new NoPlayableError({ id, ...info });
+      const last = getLastPlayed(id);
+      const lastFinished = last != null && isWatched(id, last) && loadPosition(id, last) <= 0;
       dispose = filePickerView(host, {
+        lastIndex: last,
+        continueIndex: continueTarget(all, last, lastFinished)?.index ?? null,
         name: info.name,
         files: all,
         positionOf: (index) => loadPosition(id, index),

@@ -433,3 +433,13 @@ test('markWatched resets the saved position and isWatched reports it', async () 
   assert.equal(isWatched('t', 3), true);
   assert.equal(loadPosition('t', 3), 0);
 });
+
+test('setLastPlayed / getLastPlayed remember the episode per torrent', async () => {
+  reset();
+  const { setLastPlayed, getLastPlayed } = await import('./loadMagnet.js');
+  assert.equal(getLastPlayed('t1'), null);
+  setLastPlayed('t1', 7);
+  setLastPlayed('t2', 0);
+  assert.equal(getLastPlayed('t1'), 7);
+  assert.equal(getLastPlayed('t2'), 0);
+});

@@ -207,3 +207,31 @@ test('filePickerView lists videos by season with sizes and resume markers', asyn
     dispose();
   } finally { restore(); }
 });
+
+test('filePickerView: Continue link, last watched marked and scrolled into view', async () => {
+  const { filePickerView } = await import('./filePickerView.js');
+  const restore = installStub();
+  try {
+    const container = makeStubEl('div');
+    const files = [
+      { index: 0, path: 'Show/Season 1/S01E01.mp4', size: 1 },
+      { index: 1, path: 'Show/Season 1/S01E02.mp4', size: 1 },
+    ];
+    const text = (n) => (n.textContent || '') + (n.children ?? []).map(text).join('');
+    filePickerView(container, {
+      files, lastIndex: 0, continueIndex: 1,
+      positionOf: (i) => (i === 1 ? 65 : 0),
+      hrefFor: (i) => `#/play/x/${i}`,
+    });
+    const cont = walk(container).find((n) => n.className === 'picker-continue');
+    assert.ok(cont, 'continue link');
+    assert.equal(text(cont), '▶ Continue: S01E02.mp4 · from 1:05');
+    assert.equal(walk(cont).find((n) => n.tagName === 'A').attrs.href, '#/play/x/1');
+    const last = walk(container).find((n) => n.className === 'picker-last');
+    assert.match(text(last), /S01E01\.mp4.*last watched/);
+    // nothing played: no Continue, no marker
+    const c2 = makeStubEl('div');
+    filePickerView(c2, { files, hrefFor: (i) => `#${i}` });
+    assert.ok(!walk(c2).some((n) => n.className === 'picker-continue' || n.className === 'picker-last'));
+  } finally { restore(); }
+});

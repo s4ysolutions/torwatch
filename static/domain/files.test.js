@@ -34,3 +34,12 @@ test('nextFile follows the natural order across seasons', () => {
   assert.equal(nextFile(pack, 0), null); // last
   assert.equal(nextFile(pack, 5), null); // not a video
 });
+
+test('continueTarget: last played, or the next one when it was finished', async () => {
+  const { continueTarget } = await import('./files.js');
+  assert.equal(continueTarget(pack, 1, false).index, 1); // S01E02, in progress
+  assert.equal(continueTarget(pack, 1, true).index, 2); // finished → S01E10
+  assert.equal(continueTarget(pack, 0, true).index, 0); // last of the series stays
+  assert.equal(continueTarget(pack, null, false), null); // nothing played yet
+  assert.equal(continueTarget(pack, 99, false), null); // file no longer there
+});

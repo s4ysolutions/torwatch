@@ -43,6 +43,16 @@ export function loadPosition(id, fileIndex) {
   return history().get(`pos:${id}:${fileIndex}`, 0);
 }
 
+// Last episode played per torrent (picker: "Continue", "last watched").
+export function setLastPlayed(id, fileIndex) {
+  history().set(`last:${id}`, fileIndex);
+}
+
+export function getLastPlayed(id) {
+  const v = history().get(`last:${id}`, null);
+  return Number.isInteger(v) ? v : null;
+}
+
 // Watched to the end (picker shows ✓); the saved position is reset then, so
 // a finished episode doesn't offer "resume" a few seconds before its end.
 export function markWatched(id, fileIndex) {

@@ -101,3 +101,44 @@ test('splitFrames EBML lacing negative diff', () => {
   assert.deepEqual([...out[1]], [5, 6]);
   assert.deepEqual([...out[2]], [7, 8, 9]);
 });
+
+// --- per-track audio playability (ac3mix.mkv: AC-3, E-AC-3, AAC) ---
+
+const mix = new Uint8Array(await readFile(new URL('../../testdata/ac3mix.mkv', import.meta.url)));
+const mixRange = async (s, e) => mix.slice(s, e + 1);
+const audioOf = (tracks) => tracks.filter((t) => t.type === 'audio');
+
+test('unplayable audio tracks are flagged, not fatal, when one track plays', async () => {
+  const d = new MkvDemuxer(mixRange); // default: no AC-3 decoder
+  const { tracks } = await d.readHeader();
+  assert.deepEqual(audioOf(tracks).map((t) => [t.codecId, t.playable]), [
+    ['A_AC3', false],
+    ['A_EAC3', false],
+    ['A_AAC', true],
+  ]);
+});
+
+test('no playable audio track throws Unsupported listing the codecs', async () => {
+  const d = new MkvDemuxer(mixRange, { canPlayAudio: () => false });
+  await assert.rejects(() => d.readHeader(), /Unsupported audio codec: A_AC3, A_EAC3, A_AAC/);
+});
+
+test('passthrough AC-3/E-AC-3 get first-frame config when the browser decodes them', async () => {
+  const d = new MkvDemuxer(mixRange, { canPlayAudio: () => true });
+  const { tracks } = await d.readHeader();
+  const [ac3, eac3, aac] = audioOf(tracks);
+  assert.equal(ac3.playable, true);
+  assert.equal(ac3.ac3.codec, 'ac-3');
+  assert.equal(ac3.ac3.channels, 6);
+  assert.equal(eac3.playable, true);
+  assert.equal(eac3.ac3.codec, 'ec-3');
+  assert.equal(aac.playable, true);
+  assert.equal(aac.ac3, undefined);
+});
+
+test('passthrough track whose first frame is out of probe range is unplayable', async () => {
+  // maxBytes 1 → probe budget 0: no frame read, AC-3 tracks drop out, AAC stays.
+  const d = new MkvDemuxer(mixRange, { canPlayAudio: () => true, maxBytes: 1 });
+  const { tracks } = await d.readHeader();
+  assert.deepEqual(audioOf(tracks).map((t) => t.playable), [false, false, true]);
+});

@@ -7,6 +7,9 @@
 // MkvDemuxer.samples() yields file order, which is not globally monotonic
 // across tracks, so fragments are built per track — no re-sorting here.
 
+import { PASSTHROUGH_AUDIO } from './codecs.js';
+import { dac3Payload, dec3Payload } from './ac3.js';
+
 export function box(type, ...payloads) {
   const size = 8 + payloads.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(size);
@@ -78,8 +81,15 @@ function parseASC(priv) {
   return { aot, rate, channels: channels || 2 };
 }
 
+// AC-3/E-AC-3 config comes from the first frame (MkvDemuxer.probeAc3).
+function ac3Info(track) {
+  if (!track.ac3) throw new Error(`${track.codecId} track missing first-frame config`);
+  return track.ac3;
+}
+
 function timescaleFor(track) {
   if (track.type === 'audio') {
+    if (PASSTHROUGH_AUDIO.has(track.codecId)) return ac3Info(track).sampleRate;
     if (track.codecId === 'A_AAC') return parseASC(track.codecPrivate).rate;
     if (track.codecId === 'A_OPUS') return 48000;
     // MP3 in MKV carries no sample rate/channel count: assume 44100/stereo
@@ -115,6 +125,9 @@ export function codecString(track) {
       return 'mp4a.69';
     case 'A_OPUS':
       return 'opus';
+    case 'A_AC3':
+    case 'A_EAC3':
+      return PASSTHROUGH_AUDIO.get(track.codecId);
     default:
       throw new Error(`unsupported codec for MSE: ${track.codecId}`);
   }
@@ -190,6 +203,16 @@ function sampleEntry(track) {
       if (p.length < 10) throw new Error('Opus track missing OpusHead');
       return audioEntry('Opus', p[9] || 2, 48000, box('dOps', p.slice(8)));
     }
+    // ETSI TS 102 366 F.3/F.5: ChannelCount is fixed at 2 (the real layout
+    // is in dac3/dec3).
+    case 'A_AC3': {
+      const info = ac3Info(track);
+      return audioEntry('ac-3', 2, info.sampleRate, box('dac3', dac3Payload(info)));
+    }
+    case 'A_EAC3': {
+      const info = ac3Info(track);
+      return audioEntry('ec-3', 2, info.sampleRate, box('dec3', dec3Payload(info)));
+    }
     default:
       throw new Error(`unsupported codec for MSE: ${track.codecId}`);
   }
@@ -246,6 +269,9 @@ export function initSegment(track) {
 // VFR content is approximated (documented limitation).
 function estimateDuration(track, pts) {
   if (track.codecId === 'A_AAC') return 1024;
+  // AC-3: 1536 samples per frame; E-AC-3 per MKV block from the first frame.
+  // MKV's 1ms timestamps can't give these exactly.
+  if (PASSTHROUGH_AUDIO.has(track.codecId)) return ac3Info(track).samplesPerFrame;
   // sorted copy, estimation only — sample order is never touched
   const sorted = [...pts].sort((a, b) => a - b);
   let best = 0;

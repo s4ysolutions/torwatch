@@ -161,3 +161,33 @@ test('tracksMenu container form returns disposeFn and repaints on emitter set', 
     restore();
   }
 });
+
+test('tracksMenu disables unplayable audio tracks and names the codec', () => {
+  const restore = installStub();
+  try {
+    const emitter = fakeEmitter({
+      audio: [
+        { number: 1, language: 'rus', codecId: 'A_AC3', playable: false },
+        { number: 2, language: 'eng', codecId: 'A_AAC', playable: true },
+      ],
+      subtitles: [],
+      activeAudio: 2,
+      activeSubtitle: null,
+    });
+    let switched = null;
+    const menu = tracksMenu(emitter, (n) => { switched = n; });
+    const radios = walk(menu, (n) => n.tagName === 'INPUT' && n.type === 'radio');
+    assert.equal(radios.length, 2);
+    assert.equal(radios[0].disabled, true);
+    assert.ok(!radios[1].disabled);
+    assert.equal(radios[1].checked, true);
+    radios[0].fire('change');
+    assert.equal(switched, null);
+    const label = radios[0].parentNode;
+    assert.match(label.className, /tracks-off/);
+    assert.match(label.children.map((c) => c.textContent ?? '').join(''), /AC3, not supported/);
+    menu.dispose();
+  } finally {
+    restore();
+  }
+});

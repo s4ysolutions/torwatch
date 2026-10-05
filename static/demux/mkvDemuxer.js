@@ -20,11 +20,12 @@ import {
   ID_BLOCK,
 } from './ebml.js';
 import { ByteStream } from './byteStream.js';
+import { audioSupport, PASSTHROUGH_AUDIO } from './codecs.js';
+import { parseAc3Frame } from './ac3.js';
 
 export class UnsupportedError extends Error {}
 
 const VIDEO_OK = new Set(['V_MPEG4/ISO/AVC', 'V_MPEGH/ISO/HEVC']);
-const AUDIO_OK = new Set(['A_AAC', 'A_MPEG/L3', 'A_OPUS']);
 
 // BlockGroup children not exported from ebml.js
 const ID_REFERENCE_BLOCK = 0xfb;
@@ -32,6 +33,10 @@ const ID_REFERENCE_BLOCK = 0xfb;
 const TRACK_TYPE = { 1: 'video', 2: 'audio', 17: 'subtitle' };
 
 const HEADER_PROBE = 64 * 1024;
+// How far past the first cluster to look for the first frame of a
+// passthrough audio track. Kept well under the ByteStream window so the
+// playback pump starting at firstClusterOff reuses the bytes (no reset).
+const FRAME_PROBE = 2 * 1024 * 1024;
 
 function uintOf(bytes) {
   let v = 0;
@@ -50,9 +55,13 @@ function strOf(bytes) {
   return new TextDecoder().decode(bytes);
 }
 
+// opts.canPlayAudio(track) => boolean decides per audio track whether the
+// player can use it (default: codecs every MSE browser decodes). Audio
+// tracks get `playable`; readHeader throws only when no audio track is.
 export class MkvDemuxer {
   constructor(fetchRange, opts = {}) {
     this.stream = new ByteStream(fetchRange, opts.chunkSize, opts.maxBytes);
+    this.canPlayAudio = typeof opts.canPlayAudio === 'function' ? opts.canPlayAudio : audioSupport();
     this.tracks = null;
     this.timecodeScale = 1_000_000;
     this.infoDuration = 0;
@@ -120,12 +129,49 @@ export class MkvDemuxer {
       if (t.type === 'video' && !VIDEO_OK.has(t.codecId)) {
         throw new UnsupportedError(`Unsupported video codec: ${t.codecId}`);
       }
-      if (t.type === 'audio' && !AUDIO_OK.has(t.codecId)) {
-        throw new UnsupportedError(`Unsupported audio codec: ${t.codecId}`);
+      if (t.type === 'audio') {
+        try {
+          t.playable = !!this.canPlayAudio(t);
+        } catch {
+          t.playable = false;
+        }
       }
       this.byNumber.set(t.number, t);
     }
+    const audio = this.tracks.filter((t) => t.type === 'audio');
+    const assertPlayableAudio = () => {
+      if (audio.length && !audio.some((t) => t.playable)) {
+        const codecs = [...new Set(audio.map((t) => t.codecId))].join(', ');
+        throw new UnsupportedError(`Unsupported audio codec: ${codecs}`);
+      }
+    };
+    assertPlayableAudio();
+    const probe = audio.filter((t) => t.playable && PASSTHROUGH_AUDIO.has(t.codecId));
+    if (probe.length) {
+      await this.probeAc3(probe);
+      assertPlayableAudio();
+    }
     return { tracks: this.tracks, timecodeScale: this.timecodeScale };
+  }
+
+  // AC-3/E-AC-3 carry no CodecPrivate: read each track's first frame for
+  // the fMP4 config (track.ac3). A track whose frame isn't found within
+  // FRAME_PROBE bytes, or doesn't parse, is marked unplayable.
+  async probeAc3(tracks) {
+    const want = new Map(tracks.map((t) => [t.number, t]));
+    const budget = Math.min(FRAME_PROBE, Math.floor(this.stream.maxBytes / 2));
+    try {
+      for await (const s of this.samples(0, Infinity, [...want.keys()], this.firstClusterOff + budget)) {
+        const t = want.get(s.trackNumber);
+        if (!t) continue;
+        want.delete(s.trackNumber);
+        t.ac3 = parseAc3Frame(s.data);
+        if (!want.size) break;
+      }
+    } catch {
+      // read failure: tracks not reached stay unconfigured → unplayable
+    }
+    for (const t of tracks) if (!t.ac3) t.playable = false;
   }
 
   parseInfo(pay, end) {
@@ -271,11 +317,13 @@ export class MkvDemuxer {
     return { trackNumber: tn.value, timestamp, keyframe, frames };
   }
 
-  async *samples(fromSec, toSec, trackNumbers) {
+  // stopAt (absolute byte offset, optional) ends the walk at that point.
+  async *samples(fromSec, toSec, trackNumbers, stopAt = Infinity) {
     if (!this.tracks) throw new Error('call readHeader first');
     const want = new Set(trackNumbers);
     let off = this.firstClusterOff;
     for (;;) {
+      if (off >= stopAt) return;
       try {
         await this.stream.ensure(off, 12);
       } catch {
@@ -295,17 +343,17 @@ export class MkvDemuxer {
         if (off >= this.segmentEnd) return;
         continue;
       }
-      yield* this.walkCluster(pay, end, want, fromSec, toSec);
+      yield* this.walkCluster(pay, end, want, fromSec, toSec, stopAt);
       if (h.size === -1) return;
       off = end;
       if (off >= this.segmentEnd) return;
     }
   }
 
-  async *walkCluster(pay, end, want, fromSec, toSec) {
+  async *walkCluster(pay, end, want, fromSec, toSec, stopAt = Infinity) {
     let q = pay;
     let clusterTs = 0;
-    while (q < end) {
+    while (q < end && q < stopAt) {
       try {
         await this.stream.ensure(q, 12);
       } catch {

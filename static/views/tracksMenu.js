@@ -6,8 +6,9 @@
 // tracksMenu(tracksEmitter, onSwitch) => element (brief shorthand)
 //
 // props: { emitter|tracks|tracksEmitter, onSwitch, onSubtitle }
-//   state shape: { audio: [{number, language?, name?}], subtitles: [{label}],
-//     activeAudio, activeSubtitle }
+//   state shape: { audio: [{number, language?, name?, codecId?, playable?}],
+//     subtitles: [{label}], activeAudio, activeSubtitle }
+//   playable === false → radio disabled, label notes the codec.
 //   onSwitch(trackNumber) — audio radio change. onSubtitle(label, checked) —
 //   subtitle checkbox change (optional).
 //
@@ -81,12 +82,20 @@ export function tracksMenu(containerOrProps, maybeProps) {
       const radio = el('input', { type: 'radio', name: 'tw-audio' });
       radio.value = String(a.number);
       radio.checked = a.number === state.activeAudio;
+      const label = ` ${a.language || a.name || `Track ${a.number}`}`;
+      if (a.playable === false) {
+        radio.disabled = true;
+        const codec = String(a.codecId || 'codec').replace(/^A_/, '');
+        pop.appendChild(el('label', { class: 'tracks-audio tracks-off', title: 'This browser cannot decode this audio codec' },
+          [radio, `${label} (${codec}, not supported in this browser)`]));
+        continue;
+      }
       const onChange = () => {
         if (typeof onSwitch === 'function') onSwitch(a.number);
       };
       radio.addEventListener('change', onChange);
       itemListeners.push({ node: radio, ev: 'change', fn: onChange });
-      pop.appendChild(el('label', { class: 'tracks-audio' }, [radio, ` ${a.language || a.name || `Track ${a.number}`}`]));
+      pop.appendChild(el('label', { class: 'tracks-audio' }, [radio, label]));
     }
 
     pop.appendChild(el('div', { class: 'tracks-head' }, ['Subtitles']));

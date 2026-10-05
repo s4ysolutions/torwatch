@@ -73,6 +73,13 @@ demuxer converts to AVCC on the fly. Seek = fetch a different byte range, reset
 SourceBuffer, resume. Unsupported layouts (ordered chapters, header-stripped
 codecs, non-MSE codecs) → clear error message + offer raw file download.
 
+Audio is decided per track. AC-3/E-AC-3 are muxed into fMP4 as-is
+(`ac-3`/`ec-3` sample entry, `dac3`/`dec3` built from the track's first
+frame, since MKV carries no CodecPrivate for them) and used only where
+`MediaSource.isTypeSupported` says the browser decodes them (Safari, Edge on
+Windows). Tracks the browser can't decode stay listed but disabled in the
+tracks menu; the file is rejected only when no audio track is playable.
+
 ### OPFS local cache
 
 Chunks are written to an OPFS (Origin Private File System) file as they arrive

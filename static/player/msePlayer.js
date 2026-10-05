@@ -1,4 +1,4 @@
-import { initSegment, fragment, codecString } from '../demux/fmp4Muxer.js';
+import { initSegment, fragment, codecString, decodeTime } from '../demux/fmp4Muxer.js';
 // F-A/F-B helpers live in videoStageView.js (Task 15 contract): drainGroups
 // flushes trailing partial fragment groups, finalizePlayback endOfStreams
 // only when open. (Player→views import is intentional per that contract.)
@@ -87,7 +87,8 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       const tn = +String(key).split(':')[0];
       const track = tn === videoTrack.number ? videoTrack : activeAudio;
       const buf = tn === videoTrack.number ? vbuf : abuf;
-      queue.push({ buf, data: fragment(track, batch, batch[0].timestamp * 90000) });
+      // tfdt is in the track's own timescale (90k video, sample rate audio).
+      queue.push({ buf, data: fragment(track, batch, decodeTime(track, batch[0].timestamp)) });
       appendNext();
     };
     try {

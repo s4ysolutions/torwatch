@@ -283,3 +283,10 @@ test('AC-3 track without first-frame config fails loudly', () => {
   const track = { type: 'audio', codecId: 'A_AC3', codecPrivate: new Uint8Array(0), language: 'und' };
   assert.throws(() => initSegment(track), /first-frame config/);
 });
+
+test('fragment rounds a fractional baseDecodeTime instead of throwing', () => {
+  const track = { type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' };
+  const frag = fragment(track, [{ timestamp: 0.009, keyframe: true, data: new Uint8Array(4) }], 0.009 * 90000);
+  const tfdt = findBox(frag, 'tfdt');
+  assert.equal(Number(new DataView(tfdt.buffer, tfdt.byteOffset, tfdt.length).getBigUint64(12)), 810);
+});

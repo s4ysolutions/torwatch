@@ -375,3 +375,61 @@ test('describeSource shows actual amounts', async () => {
     'Downloaded via browser peers: 120.0 MB · from local cache: 1.50 GB');
   assert.equal(describeSource({ cache: 300 * 1024, network: 0 }, 'server'), 'Playing from local cache (300 KB read)');
 });
+
+// --- auto-advance to the next episode ---
+
+function autoNextVideo() {
+  const l = {};
+  return {
+    addEventListener(ev, fn) { (l[ev] ??= []).push(fn); },
+    removeEventListener(ev, fn) { l[ev] = (l[ev] ?? []).filter((f) => f !== fn); },
+    fire(ev) { for (const fn of l[ev] ?? []) fn(); },
+    count: () => Object.values(l).reduce((n, a) => n + a.length, 0),
+  };
+}
+
+test('armAutoNext counts down after ended, then fires', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { armAutoNext } = await import('./autoNext.js');
+  const video = autoNextVideo();
+  const ticks = [];
+  let fired = 0;
+  const a = armAutoNext({ video, delaySec: 3, onTick: (s) => ticks.push(s), onFire: () => fired++ });
+  video.fire('ended');
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  assert.equal(fired, 0);
+  t.mock.timers.tick(1000);
+  assert.deepEqual(ticks, [3, 2, 1]);
+  assert.equal(fired, 1);
+  a.dispose();
+  assert.equal(video.count(), 0, 'listeners removed');
+});
+
+test('armAutoNext: seeking/playing again or Cancel stops it', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const { armAutoNext } = await import('./autoNext.js');
+  for (const how of ['seeking', 'play', 'cancel']) {
+    const video = autoNextVideo();
+    let fired = 0;
+    let cancelled = 0;
+    const a = armAutoNext({ video, delaySec: 2, onFire: () => fired++, onCancel: () => cancelled++ });
+    video.fire('ended');
+    t.mock.timers.tick(1000);
+    if (how === 'cancel') a.cancel(); else video.fire(how);
+    t.mock.timers.tick(5000);
+    assert.equal(fired, 0, how);
+    assert.equal(cancelled, 1, how);
+    a.dispose();
+  }
+});
+
+test('markWatched resets the saved position and isWatched reports it', async () => {
+  reset();
+  const { markWatched, isWatched } = await import('./loadMagnet.js');
+  savePosition('t', 3, 1318);
+  assert.equal(isWatched('t', 3), false);
+  markWatched('t', 3);
+  assert.equal(isWatched('t', 3), true);
+  assert.equal(loadPosition('t', 3), 0);
+});

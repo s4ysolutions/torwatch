@@ -80,3 +80,5 @@ font-weight:400;margin:.15rem 0;cursor:pointer}
 .picker-group li{margin:.15rem 0;overflow-wrap:anywhere}
 .picker-size,.picker-resume{color:var(--muted);font-size:.82rem}
 .episode-nav{display:flex;gap:1rem;flex-wrap:wrap;margin:-.3rem 0 .6rem;font-size:.92rem}
+.next-countdown button{margin-left:.3rem}
+.auto-next{display:inline-flex;gap:.3rem;align-items:center;color:var(--muted)}

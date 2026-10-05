@@ -3,7 +3,8 @@
 // resume marker for started ones.
 //
 // filePickerView(container, { name, files, positionOf(index) => sec,
-//   hrefFor(index) => string, otherCount }) => disposeFn
+//   watchedOf(index) => bool, hrefFor(index) => string, otherCount })
+//   => disposeFn
 
 import { el } from '../util/dom.js';
 import { formatBytes } from '../util/format.js';
@@ -18,7 +19,7 @@ const clock = (sec) => {
 };
 
 export function filePickerView(container, props) {
-  const { name = '', files = [], positionOf = () => 0, hrefFor, otherCount = 0 } = props ?? {};
+  const { name = '', files = [], positionOf = () => 0, watchedOf = () => false, hrefFor, otherCount = 0 } = props ?? {};
   const groups = groupByFolder(files);
   const total = groups.reduce((n, g) => n + g.files.length, 0);
   const body = [
@@ -33,6 +34,7 @@ export function filePickerView(container, props) {
         el('a', { href: hrefFor(f.index), class: 'picker-file' }, baseName(f.path)),
         el('span', { class: 'picker-size' }, ` ${formatBytes(f.size ?? 0)}`),
         pos > 0 ? el('span', { class: 'picker-resume' }, ` · resume at ${clock(pos)}`) : null,
+        pos <= 0 && watchedOf(f.index) ? el('span', { class: 'picker-resume' }, ' · ✓ watched') : null,
       ]);
     });
     body.push(el('section', { class: 'picker-group' }, [

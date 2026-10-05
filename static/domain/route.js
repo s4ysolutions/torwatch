@@ -16,8 +16,15 @@ function current() {
 
 export const route = emitter(current());
 
+// go() sets the hash and the route at once; the hashchange that follows
+// must not set the same route again (that mounted every view twice).
+const sameRoute = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+function update(r) {
+  if (!sameRoute(r, route.get())) route.set(r);
+}
+
 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
-  window.addEventListener('hashchange', () => route.set(current()));
+  window.addEventListener('hashchange', () => update(current()));
 }
 
 export function go(path) {
@@ -26,7 +33,7 @@ export function go(path) {
     if (globalThis.location) globalThis.location.hash = hash;
     else if (typeof location !== 'undefined') location.hash = hash;
   } catch {}
-  route.set(parseRoute(hash));
+  update(parseRoute(hash));
 }
 
 route.go = go;

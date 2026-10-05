@@ -26,10 +26,19 @@ import {
   findMagnet,
   loadPosition,
   bindPosition,
+  markWatched,
+  isWatched,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
 import { playableFiles, nextFile, baseName } from './domain/files.js';
 import { filePickerView } from './views/filePickerView.js';
+import { armAutoNext } from './usecases/autoNext.js';
+
+// Set when the player advances to the next episode by itself: the next
+// mount starts playback without waiting for ▶ (same page, so the user's
+// earlier interaction still allows playback with sound).
+let autoplayNextMount = false;
+const autoNextOn = () => engineStore.get('autoNext', true);
 import { cachingFetchRange, pruneCache, cacheSize, describeSource } from './usecases/cacheFile.js';
 import { formatBytes } from './util/format.js';
 import { clearEverywhere, describeClear } from './usecases/clearEverywhere.js';
@@ -413,6 +422,12 @@ function mountPlay({ id: rawId, file }) {
     else video.addEventListener('loadedmetadata', apply, { once: true });
   }
   on(bindPosition(video, id, fileIndex));
+  const onEnded = () => markWatched(id, fileIndex);
+  video.addEventListener('ended', onEnded);
+  on(() => video.removeEventListener('ended', onEnded));
+  // Arrived here by auto-advance: start without waiting for ▶.
+  const autoStart = autoplayNextMount;
+  autoplayNextMount = false;
 
   // Subtitles widget. Online search hits the backend
   // OpenSubtitles proxy; results load into the same track list.
@@ -524,10 +539,37 @@ function mountPlay({ id: rawId, file }) {
       // Season packs: back to the list, and on to the next episode.
       if (playableFiles(info.files).length > 1) {
         const next = nextFile(info.files, fileIndex);
+        const nextHref = next ? `#/play/${id}/${next.index}` : null;
+        const countdown = el('span', { class: 'next-countdown' });
         const nav = el('div', { class: 'episode-nav' }, [
           el('a', { href: `#/files/${id}` }, '☰ Episodes'),
-          next ? el('a', { href: `#/play/${id}/${next.index}`, title: next.path }, `Next: ${baseName(next.path)} ▶`) : null,
+          next ? el('a', { href: nextHref, title: next.path }, `Next: ${baseName(next.path)} ▶`) : null,
+          countdown,
         ]);
+        if (next) {
+          const toggle = el('input', { type: 'checkbox', ...(autoNextOn() ? { checked: true } : {}) });
+          toggle.addEventListener('change', () => {
+            engineStore.set('autoNext', toggle.checked);
+            if (!toggle.checked) auto.cancel();
+          });
+          nav.appendChild(el('label', { class: 'auto-next' }, [toggle, ' Auto-play next']));
+          const cancelBtn = el('button', { type: 'button' }, 'Cancel');
+          cancelBtn.addEventListener('click', () => auto.cancel());
+          const auto = armAutoNext({
+            video,
+            onTick: (sec) => {
+              if (!autoNextOn()) return auto.cancel();
+              countdown.replaceChildren(`Next in ${sec} s `, cancelBtn);
+            },
+            onCancel: () => countdown.replaceChildren(),
+            onFire: () => {
+              if (cancelled || !autoNextOn()) return;
+              autoplayNextMount = true;
+              go(nextHref);
+            },
+          });
+          on(() => auto.dispose());
+        }
         stageHost.insertBefore(nav, stageHost.firstChild?.nextSibling ?? null);
       }
       if (/\.mkv$/i.test(name)) {
@@ -577,6 +619,12 @@ function mountPlay({ id: rawId, file }) {
         if (player.ready?.catch) player.ready.catch((e) => { if (!cancelled) fail(e); });
       }
       playerState.set({ ...playerState.get(), phase: 'playing', magnetId: id, fileIndex, error: null });
+      if (autoStart) {
+        Promise.resolve(video.play?.()).catch(() => {
+          // Autoplay blocked (e.g. Safari without a fresh tap).
+          if (!cancelled) playerState.set({ ...playerState.get(), note: 'Press ▶ to start the next episode' });
+        });
+      }
     })
     .catch((e) => {
       if (!cancelled) fail(e);
@@ -613,6 +661,7 @@ function mountFiles({ id: rawId }) {
         name: info.name,
         files: all,
         positionOf: (index) => loadPosition(id, index),
+        watchedOf: (index) => isWatched(id, index),
         hrefFor: (index) => `#/play/${id}/${index}`,
         otherCount: all.length - playable.length,
       });

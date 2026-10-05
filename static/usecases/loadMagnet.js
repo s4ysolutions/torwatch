@@ -43,6 +43,17 @@ export function loadPosition(id, fileIndex) {
   return history().get(`pos:${id}:${fileIndex}`, 0);
 }
 
+// Watched to the end (picker shows ✓); the saved position is reset then, so
+// a finished episode doesn't offer "resume" a few seconds before its end.
+export function markWatched(id, fileIndex) {
+  history().set(`watched:${id}:${fileIndex}`, true);
+  savePosition(id, fileIndex, 0);
+}
+
+export function isWatched(id, fileIndex) {
+  return history().get(`watched:${id}:${fileIndex}`, false) === true;
+}
+
 // Wire a video element's timeupdate → store. Returns unbind.
 export function bindPosition(video, id, fileIndex) {
   const onTime = () => savePosition(id, fileIndex, video.currentTime);

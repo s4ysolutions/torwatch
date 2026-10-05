@@ -67,6 +67,14 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
       }
       return { id: nid, name: t.name ?? '', state: 'fetching-meta', files: [] };
     },
+    // Drop every torrent in this tab's WebTorrent client (pieces live in
+    // memory) → number removed.
+    async clearAll() {
+      if (!client) return 0;
+      const ids = (client.torrents ?? []).map((t) => norm(t.infoHash));
+      for (const id of ids) await this.deleteMagnet(id);
+      return ids.length;
+    },
     async deleteMagnet(id) {
       const nid = norm(id);
       errors.delete(nid);

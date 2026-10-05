@@ -113,3 +113,20 @@ func TestStaticFilesRevalidate(t *testing.T) {
 		t.Fatalf("got %d Cache-Control=%q", r.Code, r.Header().Get("Cache-Control"))
 	}
 }
+
+func TestClearCacheEndpoint(t *testing.T) {
+	fm := &fakeFileManager{}
+	srv := newServer(t.TempDir(), fm, Opts{Auth: "u:p"})
+	r := httptest.NewRecorder()
+	srv.ServeHTTP(r, httptest.NewRequest("DELETE", "/api/cache", nil))
+	if r.Code != 401 || fm.cleared != 0 {
+		t.Fatalf("unauthenticated: %d, cleared %d", r.Code, fm.cleared)
+	}
+	req := httptest.NewRequest("DELETE", "/api/cache", nil)
+	req.SetBasicAuth("u", "p")
+	r = httptest.NewRecorder()
+	srv.ServeHTTP(r, req)
+	if r.Code != 200 || fm.cleared != 1 || !strings.Contains(r.Body.String(), `"removed":3`) {
+		t.Fatalf("got %d %q cleared=%d", r.Code, r.Body.String(), fm.cleared)
+	}
+}

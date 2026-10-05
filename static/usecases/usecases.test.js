@@ -317,3 +317,22 @@ test('pruneCache drops expired files, then least recently used over budget', asy
   await clearCache(o);
   assert.equal(await cacheSize(o), 0);
 });
+
+test('clearEverywhere clears local, in-browser and server; reports a server failure', async () => {
+  const { clearEverywhere, describeClear } = await import('./clearEverywhere.js');
+  const o = opfsAdapter(null);
+  await o.write('a:0', 0, new Uint8Array(2048));
+  const calls = [];
+  const browser = { clearAll: async () => { calls.push('browser'); return 2; } };
+  const server = { clearServerCache: async () => { calls.push('server'); return { removed: 3 }; } };
+  const r = await clearEverywhere({ opfs: o, server, browser });
+  assert.deepEqual(r, { localBytes: 2048, browserTorrents: 2, serverTorrents: 3, serverError: null });
+  assert.deepEqual(calls, ['browser', 'server']);
+  assert.deepEqual(await o.listIds(), []);
+  const fmt = (n) => `${n} B`;
+  assert.equal(describeClear(r, fmt), 'Cleared: local 2048 B, 2 in-browser torrent(s), 3 server torrent(s)');
+  const down = { clearServerCache: async () => { throw new Error('request failed (401)'); } };
+  const r2 = await clearEverywhere({ opfs: o, server: down, browser: null });
+  assert.equal(r2.serverError, 'request failed (401)');
+  assert.match(describeClear(r2, fmt), /server not cleared \(request failed \(401\)\)/);
+});

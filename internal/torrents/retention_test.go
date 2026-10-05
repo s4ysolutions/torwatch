@@ -2,6 +2,7 @@ package torrents
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -197,5 +198,77 @@ func TestCleanupRemovesRealStoragePath(t *testing.T) {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Fatalf("storage path not evicted: %v (err %v)", p, err)
 		}
+	}
+}
+
+func writeFiles(t *testing.T, dir string, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		p := filepath.Join(dir, n)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func listDir(t *testing.T, dir string) []string {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, e := range ents {
+		out = append(out, e.Name())
+	}
+	return out
+}
+
+func TestRemoveOrphansKeepsLiveTorrentsAndClientState(t *testing.T) {
+	m, fc := newTestManager(t)
+	id, err := m.Add(testMagnetA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fc.releaseInfo()
+	waitState(t, m, id, "ready") // fake torrent name: video.mp4
+	dir := m.dataDir
+	writeFiles(t, dir, "video.mp4", "Old.Movie.2019/old.mkv", ".torrent.db", ".torrent.db-wal")
+	removed, err := m.RemoveOrphans()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(removed) != "[Old.Movie.2019]" {
+		t.Fatalf("removed %v", removed)
+	}
+	if got := fmt.Sprint(listDir(t, dir)); got != "[.torrent.db .torrent.db-wal video.mp4]" {
+		t.Fatalf("left %s", got)
+	}
+}
+
+func TestClearAllDropsEverythingButClientState(t *testing.T) {
+	m, fc := newTestManager(t)
+	for _, mag := range []string{testMagnetA, testMagnetB} {
+		if _, err := m.Add(mag); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fc.releaseInfo()
+	writeFiles(t, m.dataDir, "video.mp4", "Other/x.mkv", ".torrent.db")
+	n, err := m.ClearAll()
+	if err != nil || n != 2 {
+		t.Fatalf("ClearAll = %d, %v", n, err)
+	}
+	if got := fmt.Sprint(listDir(t, m.dataDir)); got != "[.torrent.db]" {
+		t.Fatalf("left %s", got)
+	}
+	m.mu.Lock()
+	left := len(m.byID)
+	m.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d torrents still registered", left)
 	}
 }

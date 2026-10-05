@@ -20,6 +20,7 @@ type fileManager interface {
 	Remove(id string) error
 	Info(id string) (torrents.MagnetInfo, error)
 	FileReader(ctx context.Context, id string, index int) (io.ReadSeekCloser, int64, error)
+	ClearAll() (int, error)
 }
 
 // Opts configures optional Server integrations.
@@ -133,6 +134,17 @@ func newServer(staticDir string, m fileManager, opts Opts) *Server {
 			json.NewEncoder(w).Encode(map[string]string{"id": id})
 		})
 		mux.HandleFunc("GET /api/magnets/{id}/files/{index}", s.handleStream)
+		// Drop every torrent and its downloaded data (all users of this
+		// server: put it behind -auth / TORWATCH_AUTH).
+		mux.HandleFunc("DELETE /api/cache", func(w http.ResponseWriter, r *http.Request) {
+			n, err := m.ClearAll()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]int{"removed": n})
+		})
 	}
 	mux.HandleFunc("GET /api/opensubs/download", s.handleOpensubsDownload)
 	mux.Handle("/", noCache(http.FileServer(http.Dir(staticDir))))

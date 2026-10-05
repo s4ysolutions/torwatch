@@ -209,3 +209,84 @@ func (m *Manager) StartCleanup(ctx context.Context, ttl time.Duration, maxDisk i
 		}
 	}
 }
+
+// isClientState reports anacrolix's own files in the data dir: the piece
+// completion database (.torrent.db + -wal/-shm, or .torrent.bolt.db).
+// They're open while the client runs and must never be deleted.
+func isClientState(name string) bool {
+	return strings.HasPrefix(name, ".torrent.")
+}
+
+// ownedNamesLocked returns the data-dir entry names that belong to a
+// registered torrent. Caller must hold m.mu.
+func (m *Manager) ownedNamesLocked() map[string]bool {
+	owned := make(map[string]bool)
+	for id, e := range m.byID {
+		name := e.name
+		if e.t != nil && e.t.Name() != "" {
+			name = e.t.Name()
+		}
+		for _, p := range storagePaths(m.dataDir, id, name) {
+			owned[filepath.Base(p)] = true
+		}
+	}
+	return owned
+}
+
+// removeUnowned deletes every data-dir entry that is neither client state
+// nor (when keepOwned) owned by a registered torrent. Returns the names.
+func (m *Manager) removeUnowned(keepOwned bool) ([]string, error) {
+	m.mu.Lock()
+	owned := map[string]bool{}
+	if keepOwned {
+		owned = m.ownedNamesLocked()
+	}
+	dataDir := m.dataDir
+	m.mu.Unlock()
+	ents, err := os.ReadDir(dataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var removed []string
+	for _, ent := range ents {
+		name := ent.Name()
+		if isClientState(name) || owned[name] {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dataDir, name)); err != nil {
+			return removed, err
+		}
+		removed = append(removed, name)
+	}
+	return removed, nil
+}
+
+// RemoveOrphans deletes downloads no registered torrent owns — after a
+// restart the manager starts empty, so earlier downloads would otherwise
+// never be reached by TTL or disk-budget cleanup. Run it at startup.
+func (m *Manager) RemoveOrphans() ([]string, error) {
+	return m.removeUnowned(true)
+}
+
+// ClearAll drops every torrent and deletes all downloaded data (the
+// client's piece-completion database stays; it is in use). Returns how
+// many torrents were dropped.
+func (m *Manager) ClearAll() (int, error) {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.byID))
+	for id := range m.byID {
+		ids = append(ids, id)
+	}
+	m.mu.Unlock()
+	n := 0
+	for _, id := range ids {
+		if m.evict(id) {
+			n++
+		}
+	}
+	_, err := m.removeUnowned(false)
+	return n, err
+}

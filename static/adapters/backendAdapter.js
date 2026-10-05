@@ -15,6 +15,8 @@ export function backendAdapter(fetchImpl = fetch) {
       return new Uint8Array(await r.arrayBuffer());
     },
     deleteMagnet: (id) => fetchImpl(`/api/magnets/${id}`, { method: 'DELETE' }),
+    // Drop every torrent and its downloaded data on the server → {removed}.
+    clearServerCache: () => fetchImpl('/api/cache', { method: 'DELETE' }).then(json),
     searchSubs: (q) => fetchImpl(`/api/opensubs?query=${encodeURIComponent(q)}`).then(json),
     async attachNative(id, index, videoEl) {
       videoEl.src = `/api/magnets/${id}/files/${index}`;

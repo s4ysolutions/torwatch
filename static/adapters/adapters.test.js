@@ -264,3 +264,10 @@ test('backend downloadFile returns url variant', async () => {
   assert.equal(dl.blob, undefined);
   assert.ok(typeof dl.name === 'string' && dl.name.length > 0);
 });
+
+test('backend clearServerCache sends DELETE /api/cache', async () => {
+  const seen = [];
+  const a = backendAdapter(async (url, opts) => { seen.push([url, opts?.method]); return { ok: true, json: async () => ({ removed: 4 }) }; });
+  assert.deepEqual(await a.clearServerCache(), { removed: 4 });
+  assert.deepEqual(seen, [['/api/cache', 'DELETE']]);
+});

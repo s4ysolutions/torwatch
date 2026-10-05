@@ -12,9 +12,10 @@ import (
 )
 
 type fakeFileManager struct {
-	data  []byte
-	err   error
-	files []torrents.FileInfo
+	data    []byte
+	err     error
+	files   []torrents.FileInfo
+	cleared int
 }
 
 // nopSeekCloser is an io.ReadSeekCloser over a byte slice.
@@ -27,6 +28,8 @@ func (f *fakeFileManager) Add(magnet string) (string, error) { return "x", nil }
 func (f *fakeFileManager) AddTorrentFile(data []byte) (string, error) { return "x", nil }
 
 func (f *fakeFileManager) Remove(id string) error { return nil }
+
+func (f *fakeFileManager) ClearAll() (int, error) { f.cleared++; return 3, nil }
 
 func (f *fakeFileManager) Info(id string) (torrents.MagnetInfo, error) {
 	return torrents.MagnetInfo{ID: id, Files: f.files}, nil

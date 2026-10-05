@@ -27,7 +27,8 @@ import {
   bindPosition,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
-import { cachingFetchRange, pruneCache, cacheSize, clearCache } from './usecases/cacheFile.js';
+import { cachingFetchRange, pruneCache, cacheSize } from './usecases/cacheFile.js';
+import { clearEverywhere, describeClear } from './usecases/clearEverywhere.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
 import { MkvDemuxer, finishCues } from './demux/mkvDemuxer.js';
@@ -223,17 +224,28 @@ function mountHome() {
       engineStore.set('engine', v); adapter = buildAdapter(v);
     },
   });
-  // Local cache: what it holds, and a way to drop it. Played data is
-  // served from here whichever engine is selected.
+  // Local cache: what it holds, and one button that clears it together
+  // with the in-browser torrents and the server's downloads. Played data
+  // is served from the local cache whichever engine is selected.
   const cacheText = el('span', {}, 'Local cache: …');
-  const clearBtn = el('button', { type: 'button', class: 'cache-clear' }, 'Clear');
+  const clearBtn = el('button', { type: 'button', class: 'cache-clear' }, 'Clear cache (browser + server)');
   const showSize = () => cacheSize(opfs).then(
     (n) => { cacheText.textContent = `Local cache: ${formatBytes(n)} (served before either engine is asked)`; },
     () => { cacheText.textContent = 'Local cache: unavailable'; },
   );
-  clearBtn.addEventListener('click', () => {
+  clearBtn.addEventListener('click', async () => {
+    if (!globalThis.confirm?.('Delete cached video data in this browser and all downloads on the server (for every user of this server)?')) return;
     clearBtn.disabled = true;
-    clearCache(opfs).then(showSize, (e) => fail(e)).finally(() => { clearBtn.disabled = false; });
+    try {
+      const server = adapter.clearServerCache ? adapter : (buildAdapter._server ??= backendAdapter());
+      const r = await clearEverywhere({ opfs, server, browser: adapter.clearAll ? adapter : null });
+      playerState.set({ ...playerState.get(), note: describeClear(r, formatBytes) });
+    } catch (e) {
+      fail(e);
+    } finally {
+      clearBtn.disabled = false;
+      void showSize();
+    }
   });
   host.appendChild(el('div', { class: 'cache-row' }, [cacheText, ' ', clearBtn]));
   void showSize();

@@ -79,6 +79,13 @@ func run(addr, staticDir, dataDir string, ttl time.Duration, maxDisk int64, opts
 		return err
 	}
 	defer m.Close()
+	// Downloads from before this start are owned by no torrent now; TTL and
+	// disk-budget cleanup would never reach them.
+	if removed, err := m.RemoveOrphans(); err != nil {
+		log.Printf("orphan cleanup: %v", err)
+	} else if len(removed) > 0 {
+		log.Printf("removed %d orphaned download(s) from %s", len(removed), dataDir)
+	}
 	go m.StartCleanup(ctx, ttl, maxDisk, 10*time.Minute)
 	srv := &http.Server{
 		Addr: addr,

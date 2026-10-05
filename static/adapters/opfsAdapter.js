@@ -1,50 +1,87 @@
-// opfsAdapter(root?) — chunk cache for torrent pieces, one file per magnet id.
+// opfsAdapter(root?) — range cache for torrent file bytes, keyed by id.
 //
-// Memory fallback semantics (root == null, or root unusable): files keep a
-// sparse list of {offset, data} writes, so write() is O(chunk) — no
-// read-modify-write of the whole buffer per chunk (O(n²)). Reads overlay
-// the writes in order (last write wins) over zero-fill, so sparse gaps
-// read as 0x00. read(id, start, end) uses inclusive bounds, clips end to
-// size, and returns null on miss (unknown id) or when start is past EOF.
+// Every write is stored as its own immutable chunk ({offset, bytes}); the
+// set of chunks is the coverage map. read(id, start, end) (inclusive end)
+// returns bytes only when [start, end] is fully covered — clipped to the
+// file end once setEof() has recorded it — and null otherwise, so a gap
+// is always a miss, never zero-filled data.
 //
-// OPFS mode (root = await navigator.storage.getDirectory()): same semantics
-// via positional writes — SyncAccessHandle where available (worker), else a
-// seekable FileSystemWritableFileStream, else read-modify-write fallback.
-// Callers must pass null when OPFS is unavailable
-// (no navigator.storage?.getDirectory) — factory never throws.
+// OPFS mode (root = await navigator.storage.getDirectory()): one directory
+// per id, one file per chunk named by its offset, plus an `eof` file. No
+// file is ever rewritten (no truncating writable, no read-modify-write);
+// reads slice only the chunk files they need. The coverage index is
+// rebuilt from the directory listing after a reload.
+// Memory mode (root == null): same semantics, chunks kept in memory.
+
+const EOF_NAME = 'eof';
+
+// index: { chunks: [{offset, length, read(from, to) => Promise<Uint8Array>}]
+// sorted by offset, eof: number|null }.
+function covered(index, start, stop) {
+  const pieces = [];
+  let pos = start;
+  while (pos < stop) {
+    let best = null;
+    for (const c of index.chunks) {
+      if (c.offset > pos) break;
+      const cEnd = c.offset + c.length;
+      if (cEnd > pos && (!best || cEnd > best.offset + best.length)) best = c;
+    }
+    if (!best) return null;
+    const to = Math.min(best.offset + best.length, stop);
+    pieces.push({ c: best, from: pos, to });
+    pos = to;
+  }
+  return pieces;
+}
+
+async function readIndex(index, start, end) {
+  const stop = Math.min(end + 1, index.eof ?? Infinity);
+  if (start >= stop) return index.eof != null && start >= index.eof ? new Uint8Array(0) : null;
+  const pieces = covered(index, start, stop);
+  if (!pieces) return null;
+  const out = new Uint8Array(stop - start);
+  for (const { c, from, to } of pieces) {
+    out.set(await c.read(from - c.offset, to - c.offset), from - start);
+  }
+  return out;
+}
+
+function insertChunk(index, chunk) {
+  let i = index.chunks.length;
+  while (i > 0 && index.chunks[i - 1].offset > chunk.offset) i--;
+  index.chunks.splice(i, 0, chunk);
+}
+
+function maxEnd(index) {
+  let size = 0;
+  for (const c of index.chunks) size = Math.max(size, c.offset + c.length);
+  return index.eof ?? size;
+}
 
 function memoryFiles() {
-  const files = new Map(); // id -> { size, chunks: [{offset, data}] }
+  const files = new Map(); // id -> index
   const entry = (id) => {
-    let e = files.get(id);
-    if (!e) {
-      e = { size: 0, chunks: [] };
-      files.set(id, e);
-    }
-    return e;
+    if (!files.has(id)) files.set(id, { chunks: [], eof: null });
+    return files.get(id);
   };
   return {
     async write(id, offset, chunk) {
-      const e = entry(id);
-      e.chunks.push({ offset, data: chunk.slice() }); // copy: caller may reuse
-      const end = offset + chunk.length;
-      if (end > e.size) e.size = end;
+      const index = entry(id);
+      if (!chunk.length || covered(index, offset, offset + chunk.length)) return;
+      const data = chunk.slice(); // copy: caller may reuse
+      insertChunk(index, { offset, length: data.length, read: async (a, b) => data.slice(a, b) });
+    },
+    async setEof(id, size) {
+      entry(id).eof = size;
     },
     async read(id, start, end) {
-      const e = files.get(id);
-      if (!e || start >= e.size) return null;
-      const stop = Math.min(end + 1, e.size);
-      const out = new Uint8Array(stop - start); // zero-filled → sparse gaps 0x00
-      for (const { offset, data } of e.chunks) {
-        const from = Math.max(offset, start);
-        const to = Math.min(offset + data.length, stop);
-        if (from < to) out.set(data.subarray(from - offset, to - offset), from - start);
-      }
-      return out; // fresh array every call
+      const index = files.get(id);
+      return index ? readIndex(index, start, end) : null;
     },
     async stat(id) {
-      const e = files.get(id);
-      return e ? { size: e.size } : null;
+      const index = files.get(id);
+      return index ? { size: maxEnd(index) } : null;
     },
     async remove(id) {
       files.delete(id);
@@ -56,86 +93,98 @@ function memoryFiles() {
 }
 
 function opfsFiles(root) {
-  const name = (id) => encodeURIComponent(id);
+  const dirName = (id) => encodeURIComponent(id);
   const noEntry = (e) => e?.name === 'NotFoundError';
+  const indexes = new Map(); // id -> Promise<index|null>
+
+  const chunkOf = (handle, offset, length) => ({
+    offset,
+    length,
+    read: async (a, b) => new Uint8Array(await (await handle.getFile()).slice(a, b).arrayBuffer()),
+  });
+
+  async function dir(id, create) {
+    try {
+      return await root.getDirectoryHandle(dirName(id), { create });
+    } catch (e) {
+      if (noEntry(e) || e?.name === 'TypeMismatchError') return null;
+      throw e;
+    }
+  }
+
+  async function loadIndex(id, create) {
+    const d = await dir(id, create);
+    if (!d) return null;
+    const index = { dir: d, chunks: [], eof: null };
+    for await (const [name, handle] of d.entries()) {
+      if (handle.kind !== 'file') continue;
+      if (name === EOF_NAME) {
+        const n = Number(await (await handle.getFile()).text());
+        if (Number.isFinite(n)) index.eof = n;
+        continue;
+      }
+      const offset = Number(name);
+      if (!Number.isInteger(offset)) continue;
+      const size = (await handle.getFile()).size;
+      if (size > 0) insertChunk(index, chunkOf(handle, offset, size));
+    }
+    return index;
+  }
+
+  // One cached load per id (concurrent callers share it); a cached miss
+  // (null) is reloaded when a writer needs the directory created.
+  async function index(id, create) {
+    let ix = await indexes.get(id);
+    if (ix === undefined || (ix === null && create)) {
+      const p = loadIndex(id, create);
+      indexes.set(id, p);
+      try {
+        ix = await p;
+      } catch (e) {
+        indexes.delete(id);
+        throw e;
+      }
+    }
+    return ix;
+  }
+
+  async function writeFile(d, name, data) {
+    const h = await d.getFileHandle(name, { create: true });
+    const w = await h.createWritable();
+    try {
+      await w.write(data);
+    } finally {
+      await w.close();
+    }
+    return h;
+  }
+
   return {
     async write(id, offset, chunk) {
-      const h = await root.getFileHandle(name(id), { create: true });
-      // Worker path: positional write without reading the file back.
-      if (typeof h.createSyncAccessHandle === 'function') {
-        let sh = null;
-        try {
-          sh = await h.createSyncAccessHandle();
-        } catch {
-          sh = null;
-        }
-        if (sh) {
-          try {
-            sh.write(chunk, { at: offset });
-            if (typeof sh.flush === 'function') sh.flush();
-          } finally {
-            sh.close();
-          }
-          return;
-        }
-      }
-      // Main-thread path: seekable writable stream, positional write.
-      let w = null;
-      try {
-        w = await h.createWritable();
-      } catch {
-        w = null;
-      }
-      if (w && typeof w.seek === 'function') {
-        try {
-          await w.seek(offset);
-          await w.write(chunk);
-        } finally {
-          await w.close();
-        }
-        return;
-      }
-      if (w) {
-        try {
-          await w.close();
-        } catch {}
-      }
-      // Fallback (fake/testing handles): read-modify-write.
-      const cur = new Uint8Array(await (await h.getFile()).arrayBuffer());
-      const next = new Uint8Array(Math.max(cur.length, offset + chunk.length));
-      next.set(cur, 0);
-      next.set(chunk, offset);
-      const fw = await h.createWritable();
-      try {
-        await fw.write(next);
-      } finally {
-        await fw.close();
-      }
+      if (!chunk.length) return;
+      const ix = await index(id, true);
+      if (covered(ix, offset, offset + chunk.length)) return;
+      const h = await writeFile(ix.dir, String(offset), chunk);
+      insertChunk(ix, chunkOf(h, offset, chunk.length));
+    },
+    async setEof(id, size) {
+      const ix = await index(id, true);
+      if (ix.eof === size) return;
+      await writeFile(ix.dir, EOF_NAME, new TextEncoder().encode(String(size)));
+      ix.eof = size;
     },
     async read(id, start, end) {
-      let h;
-      try {
-        h = await root.getFileHandle(name(id));
-      } catch (e) {
-        if (noEntry(e)) return null;
-        throw e;
-      }
-      const cur = new Uint8Array(await (await h.getFile()).arrayBuffer());
-      if (start >= cur.length) return null;
-      return cur.slice(start, Math.min(end + 1, cur.length));
+      const ix = await index(id, false);
+      return ix ? readIndex(ix, start, end) : null;
     },
     async stat(id) {
-      try {
-        const f = await (await root.getFileHandle(name(id))).getFile();
-        return { size: f.size };
-      } catch (e) {
-        if (noEntry(e)) return null;
-        throw e;
-      }
+      const ix = await index(id, false);
+      return ix ? { size: maxEnd(ix) } : null;
     },
     async remove(id) {
+      indexes.delete(id);
       try {
-        await root.removeEntry(name(id));
+        await root.removeEntry(dirName(id), { recursive: true });
       } catch (e) {
         if (!noEntry(e)) throw e;
       }
@@ -149,6 +198,6 @@ function opfsFiles(root) {
 }
 
 export function opfsAdapter(root) {
-  if (root && typeof root.getFileHandle === 'function') return opfsFiles(root);
+  if (root && typeof root.getDirectoryHandle === 'function') return opfsFiles(root);
   return memoryFiles();
 }

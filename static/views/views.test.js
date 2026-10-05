@@ -108,7 +108,7 @@ test('statusBar shows phase text and busy class', () => {
   }
 });
 
-test('statusBar shows waiting-for-peers busy state (Task 16 watchdog)', () => {
+test('statusBar shows waiting-for-peers busy state (poll watchdog)', () => {
   const restore = installStub();
   try {
     const state = emitter({ phase: 'idle' });

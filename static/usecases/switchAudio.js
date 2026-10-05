@@ -1,6 +1,6 @@
 import { tracks } from '../domain/tracks.js';
 
-// Thin delegation to the Task 13 msePlayer ({setAudioTrack}) + tracks sync.
+// Thin delegation to msePlayer.setAudioTrack + tracks sync.
 export async function switchAudio({ player, trackNumber }) {
   if (player && typeof player.setAudioTrack === 'function') {
     await player.setAudioTrack(trackNumber);

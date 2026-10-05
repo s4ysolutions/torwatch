@@ -25,6 +25,9 @@ as much work as possible.
    dropped: browsers reach only WebRTC peers, which fail for ~80–95% of public
    magnets; not worth the second source path in v1. The source-adapter interface
    keeps it possible as a later addition.)
+   **Superseded 2026-09-21**: a browser engine (WebTorrent) was added and is
+   now the default; the Go backend is the "server" engine behind a toggle.
+   See `2026-09-21-dual-engine-torrent-design.md`.
    **Streaming (not full download) is the top priority**: pieces are fetched on
    demand ordered by playback position; a range request at byte X prioritizes
    pieces around X; seeking re-prioritizes. The full file is never required
@@ -68,9 +71,12 @@ are the constrained resources, bounded by config).
 Browser `<video>` cannot play MKV natively. When the MKV contains
 MSE-compatible codecs (h264/h265 video + aac/mp3/opus audio), it is remuxed to
 fMP4 in the browser, incrementally, while streaming — playback starts after the
-first clusters; no full download. H264 in MKV is often Annex-B in blocks; the
-demuxer converts to AVCC on the fly. Seek = fetch a different byte range, reset
-SourceBuffer, resume. Unsupported layouts (ordered chapters, header-stripped
+first clusters; no full download. H264 must be AVCC (the Matroska mapping for
+`V_MPEG4/ISO/AVC`, with avcC in CodecPrivate); Annex-B blocks are not
+converted. Seek = look up the cluster in Cues (via SeekHead; without Cues, hop
+cluster headers), reset the SourceBuffer, stream from that cluster. Embedded
+subtitle cues are collected from the same playback stream, never by a second
+pass over the file. Unsupported layouts (ordered chapters, header-stripped
 codecs, non-MSE codecs) → clear error message + offer raw file download.
 
 Audio is decided per track. AC-3/E-AC-3 are muxed into fMP4 as-is
@@ -82,8 +88,10 @@ tracks menu; the file is rejected only when no audio track is playable.
 
 ### OPFS local cache
 
-Chunks are written to an OPFS (Origin Private File System) file as they arrive
-from the backend. On page reload the partial or complete file is remounted
+Each fetched range is written to OPFS (Origin Private File System) as its own
+chunk file (one directory per file id, chunk files named by offset); the chunk
+set is the coverage map, and a read hits only when the whole range is covered,
+so missing bytes are never served as zeros. On page reload the partial or complete file is remounted
 into the player instantly. Also prevents duplicate VPS bandwidth: backend bytes
 are fetched once. Fallback for browsers without OPFS: IndexedDB blobs, or silent
 re-download. Not available in private browsing. Uses

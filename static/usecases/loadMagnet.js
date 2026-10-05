@@ -3,7 +3,7 @@ import { store } from '../util/store.js';
 
 const VIDEO_RE = /\.(mp4|mkv|webm)$/i;
 const POLL_MS = 1000;
-// C4: unbounded poll watchdog — after this long without 'ready', signal
+// Unbounded poll watchdog — after this long without 'ready', signal
 // "waiting for peers" (phase 'waiting') but keep polling.
 const WATCHDOG_MS = 60000;
 const HISTORY_CAP = 20;
@@ -51,7 +51,7 @@ export function bindPosition(video, id, fileIndex) {
 }
 
 // Shared poll loop: resolves with the magnet info once state === 'ready'.
-// Missing/unknown states count as not-ready (C4: only 'ready' breaks the
+// Missing/unknown states count as not-ready (only 'ready' or 'error' end the
 // poll). After watchdogMs without readiness, fires onStall once (default:
 // playerState phase 'waiting' → statusBar "Waiting for peers…") and keeps
 // polling — the watchdog never aborts the torrent.

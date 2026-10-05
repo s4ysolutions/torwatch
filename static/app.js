@@ -43,7 +43,7 @@ import { downloadsRow, lazyDownloadLink } from './views/downloadsRow.js';
 
 const $ = (id) => document.getElementById(id);
 
-// C4: bound the user-visible stall signal; the poll itself stays unbounded
+// Bound the user-visible stall signal; the poll itself stays unbounded
 // (server-side torrent may take arbitrarily long) — loadMagnet's watchdog
 // flips phase to 'waiting' after this long, poll breaks only on 'ready'.
 const WATCHDOG_MS = 60000;
@@ -81,15 +81,25 @@ function buildAdapter(engine) {
 adapter = buildAdapter(getEngine());
 
 function fail(e) {
-  try {
-    playerState.set({ ...playerState.get(), phase: 'error', error: e?.message ?? String(e) });
-  } catch {}
+  playerState.set({ ...playerState.get(), phase: 'error', error: e?.message ?? String(e) });
 }
 
-function clear(node) {
+// Cleanup/teardown steps: one failing step must not stop the rest, but
+// the failure is logged rather than swallowed.
+function attempt(what, fn) {
   try {
-    node.replaceChildren();
-  } catch {}
+    fn();
+  } catch (e) {
+    console.warn(`torwatch: ${what} failed`, e);
+  }
+}
+
+const revokeAll = (urls) => {
+  for (const u of urls.splice(0)) URL.revokeObjectURL(u);
+};
+
+function clear(node) {
+  node?.replaceChildren();
 }
 
 // --- home actions -----------------------------------------------------------
@@ -114,9 +124,7 @@ function showFileLinks(info) {
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
-  for (const u of fileLinkUrls.splice(0)) {
-    try { URL.revokeObjectURL(u); } catch {}
-  }
+  revokeAll(fileLinkUrls);
   const row = el('div', { class: 'downloads' });
   host.appendChild(row);
   const id = normId(info.id);
@@ -136,7 +144,6 @@ function failWithFiles(e) {
 }
 
 async function submitMagnet(magnet) {
-  // C3: busy hook is the `fetching` phase (statusBar shows busy + text).
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
     const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS });
@@ -152,7 +159,7 @@ async function submitTorrent(file) {
     const buf = await file.arrayBuffer();
     const { id: rawId } = await adapter.addTorrentFile(buf);
     const id = normId(rawId);
-    // Same poll contract as loadMagnet (C4): unbounded, 'waiting' after
+    // Same poll contract as loadMagnet: unbounded, 'waiting' after
     // WATCHDOG_MS, breaks only on state === 'ready'.
     const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS });
     const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
@@ -198,7 +205,6 @@ function mountHome() {
   fileLinkUrls = [];
   const host = $('card');
   clear(host);
-  // C3: container form → disposeFn.
   // Toggle invariant: the toggle lives only on the home card, and home
   // mounts only at phase `idle` — so there is deliberately no mid-play
   // engine switch to handle.
@@ -207,20 +213,14 @@ function mountHome() {
     onTorrentFile: (f) => void submitTorrent(f),
     onSubsFile: (f) => void stashSubs(f),
     onEngine: (v) => {
-      try {
-        const ph = playerState.get()?.phase;
-        if (ph !== 'idle' && ph !== 'error') return;
-      } catch {}
+      const ph = playerState.get()?.phase;
+      if (ph !== 'idle' && ph !== 'error') return;
       engineStore.set('engine', v); adapter = buildAdapter(v);
     },
   });
   return () => {
-    for (const u of fileLinkUrls.splice(0)) {
-      try { URL.revokeObjectURL(u); } catch {}
-    }
-    try {
-      dispose();
-    } catch {}
+    revokeAll(fileLinkUrls);
+    attempt('home card dispose', dispose);
     clear(host);
   };
 }
@@ -275,7 +275,7 @@ function mountPlay({ id: rawId, file }) {
     return () => {};
   }
 
-  // Stage (container form, C3). Container form returns only disposeFn, so
+  // Stage. The container form returns only a disposeFn, so
   // grab the <video> the view rendered for player attach + position wiring.
   on(videoStageView(stageHost, {}));
   const video = stageHost.querySelector('video');
@@ -287,30 +287,22 @@ function mountPlay({ id: rawId, file }) {
   // Restore saved position on mount; persist on timeupdate.
   const pos = loadPosition(id, fileIndex);
   if (pos > 0) {
-    const apply = () => {
-      try {
-        video.currentTime = pos;
-      } catch {}
-    };
-    try {
-      if (video.readyState >= 1) apply();
-      else video.addEventListener('loadedmetadata', apply, { once: true });
-    } catch {}
+    const apply = () => attempt('restore position', () => { video.currentTime = pos; });
+    if (video.readyState >= 1) apply();
+    else video.addEventListener('loadedmetadata', apply, { once: true });
   }
   on(bindPosition(video, id, fileIndex));
 
-  // Subtitles widget (container form, C3). Online search hits the backend
+  // Subtitles widget. Online search hits the backend
   // OpenSubtitles proxy; results load into the same track list.
   on(
     subtitlesWidget(subsHost, {
       emitter: tracks,
       video,
-      onSeek: (sec) => {
-        try {
-          if (player && typeof player.seek === 'function') player.seek(sec);
-          else video.currentTime = sec;
-        } catch {}
-      },
+      onSeek: (sec) => attempt('seek', () => {
+        if (player && typeof player.seek === 'function') player.seek(sec);
+        else video.currentTime = sec;
+      }),
       title: '',
       searchSubs: (q) => adapter.searchSubs(q),
     }),
@@ -329,9 +321,8 @@ function mountPlay({ id: rawId, file }) {
     }
   }
 
-  // Tracks menu (C1: FULL props form — the brief 2-arg shorthand drops
-  // subtitle clicks). F-B abort+clear+generation lives inside
-  // msePlayer.setAudioTrack (see player/msePlayer.js); here we just delegate.
+  // Tracks menu (props form: the 2-arg shorthand has no subtitle callback).
+  // msePlayer.setAudioTrack does the SourceBuffer swap; here we delegate.
   on(
     tracksMenu(stageHost, {
       emitter: tracks,
@@ -340,7 +331,7 @@ function mountPlay({ id: rawId, file }) {
     }),
   );
 
-  // Downloads row (C3: pull-once — re-invoke on state change, not reactive).
+  // Downloads row: pull-once view, re-rendered on state change.
   let dlDispose = null;
   let srtUrl = null;
   const videoBlobUrls = [];
@@ -358,14 +349,10 @@ function mountPlay({ id: rawId, file }) {
   };
   const renderDl = () => {
     if (cancelled) return;
-    try {
-      if (typeof dlDispose === 'function') dlDispose();
-    } catch {}
+    if (typeof dlDispose === 'function') attempt('downloads row dispose', dlDispose);
     dlDispose = null;
     if (srtUrl) {
-      try {
-        URL.revokeObjectURL(srtUrl);
-      } catch {}
+      URL.revokeObjectURL(srtUrl);
       srtUrl = null;
     }
     const st = tracks.get();
@@ -373,11 +360,9 @@ function mountPlay({ id: rawId, file }) {
     let srtLink = null;
     let srtLabel = '.srt';
     if (active?.cues?.length) {
-      try {
-        srtUrl = URL.createObjectURL(new Blob([toSrt(active.cues)], { type: 'text/srt' }));
-        srtLink = srtUrl;
-        srtLabel = active.label || '.srt';
-      } catch {}
+      srtUrl = URL.createObjectURL(new Blob([toSrt(active.cues)], { type: 'text/srt' }));
+      srtLink = srtUrl;
+      srtLabel = active.label || '.srt';
     }
     const videoUrl = adapter.downloadUrl?.(id, fileIndex) ?? null;
     dlDispose = downloadsRow(dlHost, () => ({ videoUrl, videoName: fileName, getVideo, srtUrl: srtLink, srtLabel }));
@@ -386,18 +371,12 @@ function mountPlay({ id: rawId, file }) {
   on(tracks.subscribe(renderDl));
   on(playerState.subscribe(renderDl));
   on(() => {
-    try {
-      if (typeof dlDispose === 'function') dlDispose();
-    } catch {}
+    if (typeof dlDispose === 'function') attempt('downloads row dispose', dlDispose);
     if (srtUrl) {
-      try {
-        URL.revokeObjectURL(srtUrl);
-      } catch {}
+      URL.revokeObjectURL(srtUrl);
       srtUrl = null;
     }
-    for (const u of videoBlobUrls.splice(0)) {
-      try { URL.revokeObjectURL(u); } catch {}
-    }
+    revokeAll(videoBlobUrls);
   });
 
   // Resolve the file + attach the player. Deep links reuse the same
@@ -465,23 +444,13 @@ function mountPlay({ id: rawId, file }) {
 
   return () => {
     cancelled = true;
-    for (const off of disposers.splice(0)) {
-      try {
-        off();
-      } catch {}
-    }
-    try {
-      if (player && typeof player.dispose === 'function') player.dispose();
-    } catch {}
-    try {
-      video.pause();
-    } catch {}
+    for (const off of disposers.splice(0)) attempt('play view dispose', off);
+    if (player && typeof player.dispose === 'function') attempt('player dispose', () => player.dispose());
+    video.pause();
     clear(stageHost);
     clear(subsHost);
     clear(dlHost);
-    try {
-      tracks.set({ audio: [], subtitles: [], activeAudio: null, activeSubtitle: null });
-    } catch {}
+    tracks.set({ audio: [], subtitles: [], activeAudio: null, activeSubtitle: null });
   };
 }
 
@@ -510,7 +479,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   adapter = buildAdapter(getEngine());
   // streamTo needs the worker controlling the page, so the very first
   // browser-engine native play after first install may need one reload —
-  // covered by a Task 7 manual step.
+  // see docs/manual-checklist.md.
   if (getEngine() === 'browser') void ensureSw();
   try {
     const root = await globalThis.navigator?.storage?.getDirectory?.();
@@ -522,12 +491,10 @@ window.addEventListener('DOMContentLoaded', async () => {
   // Mount-point shells carry the yt-subtitles `#status`/`#stage` styles for
   // the VIEW nodes inside them — take the shells out of layout so their own
   // `display:none` doesn't hide the views (the views carry the look).
-  try {
-    $('status').style.display = 'contents';
-    $('stage').style.display = 'contents';
-  } catch {}
+  $('status').style.display = 'contents';
+  $('stage').style.display = 'contents';
 
-  // Global status line (container form, C3; busy hook is `fetching`).
+  // Global status line (busy while phase is `fetching`).
   try {
     statusBar($('status'), playerState);
   } catch (e) {
@@ -541,9 +508,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     fail(e);
   }
   route.subscribe((r) => {
-    try {
-      teardown();
-    } catch {}
+    attempt('route teardown', teardown);
     try {
       teardown = mount(r) || (() => {});
     } catch (e) {

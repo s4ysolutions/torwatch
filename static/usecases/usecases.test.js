@@ -231,7 +231,7 @@ test('switchAudio delegates to player and syncs tracks', async () => {
   assert.equal(tracks.get().activeAudio, 2);
 });
 
-// --- C4 watchdog (Task 16) ---
+// --- poll watchdog ---
 
 test('loadMagnet signals waiting after watchdogMs but keeps polling to ready', async () => {
   reset();

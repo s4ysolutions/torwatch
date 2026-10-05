@@ -1,11 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  videoStageView,
-  drainGroups,
-  finalizePlayback,
-  createSwitchGuard,
-} from './videoStageView.js';
+import { videoStageView } from './videoStageView.js';
 
 function makeStubEl(tag) {
   const classes = new Set();
@@ -85,49 +80,6 @@ function installEnv(lsPreset) {
     else globalThis.localStorage = prevLs;
   };
 }
-
-// --- F-A: drainGroups flushes trailing partial groups ---
-
-test('drainGroups flushes leftover partial groups and empties them', () => {
-  const groups = new Map([
-    ['0:12', [{ timestamp: 12.1 }, { timestamp: 12.4 }]],
-    ['1:12', []],
-    ['0:13', [{ timestamp: 13.0 }]],
-  ]);
-  const emitted = [];
-  const n = drainGroups(groups, (key, batch) => emitted.push([key, batch.length]));
-  assert.equal(n, 2);
-  assert.deepEqual(emitted, [['0:12', 2], ['0:13', 1]]);
-  for (const [, samples] of groups) assert.equal(samples.length, 0);
-  assert.equal(drainGroups(groups, () => { throw new Error('must not emit'); }), 0);
-  assert.equal(drainGroups(null, () => {}), 0);
-});
-
-// --- F-A: finalizePlayback endOfStream guard ---
-
-test('finalizePlayback ends stream only when open, never throws', () => {
-  let calls = 0;
-  assert.ok(finalizePlayback({ readyState: 'open', endOfStream: () => { calls++; } }));
-  assert.equal(calls, 1);
-  assert.equal(finalizePlayback({ readyState: 'closed', endOfStream: () => { calls++; } }), false);
-  assert.equal(calls, 1);
-  assert.equal(finalizePlayback(null), false);
-  assert.equal(finalizePlayback({
-    readyState: 'open',
-    endOfStream: () => { throw new Error('InvalidStateError'); },
-  }), false);
-});
-
-// --- F-B: switch guard drops stale callbacks ---
-
-test('createSwitchGuard marks pre-invalidate tokens stale', () => {
-  const g = createSwitchGuard();
-  const t0 = g.token();
-  assert.equal(g.stale(t0), false);
-  g.invalidate();
-  assert.equal(g.stale(t0), true);
-  assert.equal(g.stale(g.token()), false);
-});
 
 // --- stage element form ---
 

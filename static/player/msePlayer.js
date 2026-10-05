@@ -1,8 +1,5 @@
 import { initSegment, fragment, codecString, decodeTime } from '../demux/fmp4Muxer.js';
-// F-A/F-B helpers live in videoStageView.js (Task 15 contract): drainGroups
-// flushes trailing partial fragment groups, finalizePlayback endOfStreams
-// only when open. (Player→views import is intentional per that contract.)
-import { drainGroups, finalizePlayback } from '../views/videoStageView.js';
+import { drainGroups, finalizePlayback } from './mseHelpers.js';
 
 export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   const onError = typeof hooks.onError === 'function' ? hooks.onError : () => {};
@@ -30,8 +27,8 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   let generation = 0; // bumped by seek/setAudioTrack to cancel stale pumps
   const queue = [];   // pending appends: {buf, data}
   let pumping = false;
-  let eosPending = false; // F-A: pump finished; endOfStream once queue drains
-  // I6 backpressure: pause the pump while too many appends are pending or
+  let eosPending = false; // pump finished; endOfStream once queue drains
+  // Backpressure: pause the pump while too many appends are pending or
   // >30s is buffered ahead; resume on updateend (plus a timeout fallback).
   const MAX_QUEUE = 32;
   const MAX_AHEAD_SEC = 30;
@@ -99,7 +96,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
     try {
       for await (const s of demuxer.samples(fromSec, demuxer.durationSec(), sel)) {
         if (gen !== generation) return; // stale
-        // I6: pause fetching while the append queue is full or plenty is
+        // Pause fetching while the append queue is full or plenty is
         // buffered ahead; updateend (via appendNext) wakes us early.
         while (gen === generation && (queue.length >= MAX_QUEUE || bufferedAhead() > MAX_AHEAD_SEC)) {
           await waitForDrain();
@@ -127,7 +124,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       // (gen now stale) skips flush/endOfStream, and surface one error.
       if (gen === generation) halt(e);
     } finally {
-      // F-A: flush trailing partial groups, then endOfStream once drained.
+      // Flush trailing partial groups, then endOfStream once drained.
       if (gen === generation) {
         drainGroups(groups, emit);
         if (!queue.length) finalizePlayback(ms);
@@ -173,7 +170,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       eosPending = false;
       queue.length = 0;
       if (!vbuf || !abuf) {
-        // I5: sourceopen hasn't fired yet — buffers aren't attached, so
+        // sourceopen hasn't fired yet — buffers aren't attached, so
         // there is nothing to abort/remove/queue. Just move currentTime;
         // the sourceopen pump starts from videoEl.currentTime.
         try {
@@ -195,7 +192,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       const t = trackList.find(x => playableAudio(x) && x.number === trackNumber);
       if (!t || t === activeAudio) return;
       activeAudio = t;
-      // F-B: invalidate stale pumps, abort updating buffers, clear the
+      // Invalidate stale pumps, abort updating buffers, clear the
       // pending queue — BEFORE removing the old audio buffer. Never append
       // queued fragments to a removed (detached) buffer.
       generation++;

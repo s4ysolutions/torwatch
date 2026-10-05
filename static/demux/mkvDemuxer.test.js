@@ -213,3 +213,15 @@ test('concurrent walks do not corrupt each other (own window each)', async () =>
   assert.deepEqual(b, solo);
   assert.ok(a.length > b.length);
 });
+
+test('readHeader reads the video pixel size', async () => {
+  const d = new MkvDemuxer(async (s, e) => seekBuf.slice(s, e + 1));
+  const { tracks } = await d.readHeader();
+  const v = tracks.find((t) => t.type === 'video');
+  assert.deepEqual([v.width, v.height], [160, 120]);
+});
+
+test('a video codec the browser cannot decode is refused up front', async () => {
+  const d = new MkvDemuxer(async (s, e) => seekBuf.slice(s, e + 1), { canPlayVideo: () => false });
+  await assert.rejects(() => d.readHeader(), /Unsupported video codec: V_MPEG4\/ISO\/AVC \(this browser has no decoder for it\)/);
+});

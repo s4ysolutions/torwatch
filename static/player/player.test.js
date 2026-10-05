@@ -51,7 +51,7 @@ test('mse seek-before-sourceopen does not deref null buffers', async () => {
       async *samples() {},
     };
     const tracks = [
-      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' },
+      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und', width: 320, height: 240 },
       { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'und' },
     ];
     const player = createMsePlayer(videoEl, demuxer, tracks);
@@ -90,7 +90,7 @@ test('mse player skips unplayable audio tracks (attach + setAudioTrack)', async 
     const videoEl = { src: null, currentTime: 0, buffered: { length: 0 }, play() {}, pause() {}, removeAttribute() {} };
     const demuxer = { durationSec: () => 10, async *samples() {} };
     const tracks = [
-      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' },
+      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und', width: 320, height: 240 },
       { number: 2, type: 'audio', codecId: 'A_AC3', codecPrivate: new Uint8Array(0), language: 'rus', playable: false },
       { number: 3, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'eng', playable: true },
     ];
@@ -150,7 +150,7 @@ test('mse fragments carry tfdt in each track timescale (90k video, sample-rate a
       },
     };
     const tracks = [
-      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' },
+      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und', width: 320, height: 240 },
       // AAC-LC 44100 Hz
       { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'und' },
     ];
@@ -172,22 +172,6 @@ test('mse fragments carry tfdt in each track timescale (90k video, sample-rate a
 });
 
 // --- MSE helpers ---
-
-test('drainGroups flushes leftover partial groups and empties them', async () => {
-  const { drainGroups } = await import('./mseHelpers.js');
-  const groups = new Map([
-    ['0:12', [{ timestamp: 12.1 }, { timestamp: 12.4 }]],
-    ['1:12', []],
-    ['0:13', [{ timestamp: 13.0 }]],
-  ]);
-  const emitted = [];
-  const n = drainGroups(groups, (key, batch) => emitted.push([key, batch.length]));
-  assert.equal(n, 2);
-  assert.deepEqual(emitted, [['0:12', 2], ['0:13', 1]]);
-  for (const [, samples] of groups) assert.equal(samples.length, 0);
-  assert.equal(drainGroups(groups, () => { throw new Error('must not emit'); }), 0);
-  assert.equal(drainGroups(null, () => {}), 0);
-});
 
 test('finalizePlayback ends stream only when open, never throws', async () => {
   const { finalizePlayback } = await import('./mseHelpers.js');
@@ -275,7 +259,7 @@ function strictVideo() {
   };
 }
 
-const AVC = { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' };
+const AVC = { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und', width: 320, height: 240 };
 const AAC_A = { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'eng' };
 const AAC_B = { number: 3, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x11, 0x90]), language: 'rus' };
 
@@ -356,6 +340,30 @@ test('strict MSE: a decoder error is reported as such, not as invalid state', as
     await settle();
     assert.equal(errors.length, 1);
     assert.match(errors[0], /media error 4: Unsupported audio configuration/);
+  } finally {
+    env.restore();
+  }
+});
+
+test('strict MSE: a real MKV streams to the end (regression: crash after the first fragment)', async () => {
+  const env = installStrictMse();
+  try {
+    const { readFile } = await import('node:fs/promises');
+    const { MkvDemuxer } = await import('../demux/mkvDemuxer.js');
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const bytes = new Uint8Array(await readFile(new URL('../../testdata/seek.mkv', import.meta.url)));
+    const demuxer = new MkvDemuxer(async (s, e) => bytes.slice(s, e + 1));
+    const { tracks } = await demuxer.readHeader();
+    const video = strictVideo();
+    const errors = [];
+    const player = createMsePlayer(video, demuxer, tracks, { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    for (let i = 0; i < 200 && env.all[0].readyState !== 'ended'; i++) await settle(10);
+    assert.deepEqual(errors, []);
+    assert.equal(env.all[0].readyState, 'ended', 'reached endOfStream');
+    const [v, a] = env.all[0].sourceBuffers;
+    assert.ok(v.appended.length > 5 && a.appended.length > 5);
+    player.dispose();
   } finally {
     env.restore();
   }

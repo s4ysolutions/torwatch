@@ -122,7 +122,7 @@ export function codecString(track) {
       const compat = ((p[2] << 24) | (p[3] << 16) | (p[4] << 8) | p[5]) >>> 0;
       const tier = (p[1] & 32) ? 'H' : 'L';
       const constraints = [...p.slice(6, 12)].map(b => hex(b)).join('');
-      return `hev1.${idc}.${compat.toString(16).toLowerCase().padStart(8, '0')}.${tier}${p[12]}.${constraints}`;
+      return `hvc1.${idc}.${compat.toString(16).toLowerCase().padStart(8, '0')}.${tier}${p[12]}.${constraints}`;
     }
     case 'A_AAC':
       return `mp4a.40.${parseASC(track.codecPrivate).aot}`;
@@ -144,10 +144,11 @@ function langCode(lang) {
   return u16(((c.charCodeAt(0) - 0x60) << 10) | ((c.charCodeAt(1) - 0x60) << 5) | (c.charCodeAt(2) - 0x60));
 }
 
-const IDENTITY_MATRIX = new Uint8Array([
-  0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+// {a, b, u, c, d, v, x, y, w}: a = d = 1.0 (16.16), w = 1.0 (2.30).
+const IDENTITY_MATRIX = concat([
+  u32(0x00010000), u32(0), u32(0),
+  u32(0), u32(0x00010000), u32(0),
+  u32(0), u32(0), u32(0x40000000),
 ]);
 
 function descTag(tag, payload) {
@@ -170,14 +171,45 @@ function esds(objectType, asc) {
   return fullBox('esds', 0, 0, descTag(0x03, es));
 }
 
-function visualEntry(fourcc, codecBox) {
+function gcd(a, b) {
+  while (b) [a, b] = [b, a % b];
+  return a;
+}
+
+// Coded size and display size of a video track (MKV PixelWidth/Height and
+// DisplayWidth/Height). Browsers reject a 0x0 sample entry as an invalid
+// config, so a missing size is an error, not a default.
+function videoSize(track) {
+  const w = track.width | 0;
+  const h = track.height | 0;
+  if (!(w > 0 && h > 0)) throw new Error(`video track ${track.number} has no pixel size`);
+  const dw = track.displayWidth > 0 ? track.displayWidth : w;
+  const dh = track.displayHeight > 0 ? track.displayHeight : h;
+  return { w, h, dw, dh };
+}
+
+// pasp: pixel aspect ratio when the display size isn't the coded size
+// (anamorphic encodes); none for square pixels.
+function pasp(track) {
+  const { w, h, dw, dh } = videoSize(track);
+  let hs = dw * h;
+  let vs = dh * w;
+  if (hs === vs) return [];
+  const g = gcd(hs, vs);
+  hs /= g;
+  vs /= g;
+  return [box('pasp', u32(hs), u32(vs))];
+}
+
+function visualEntry(fourcc, track, codecBox) {
+  const { w, h } = videoSize(track);
   return box(fourcc,
     zeros(6), u16(1),
     zeros(16), // pre_defined + reserved
-    u16(0), u16(0), // width/height unknown to demuxer; decoders use SPS
+    u16(w), u16(h),
     u32(0x00480000), u32(0x00480000), u32(0),
     u16(1), zeros(32), u16(0x18), u16(0xffff),
-    codecBox);
+    codecBox, ...pasp(track));
 }
 
 function audioEntry(fourcc, channels, rate, codecBox) {
@@ -193,9 +225,11 @@ function audioEntry(fourcc, channels, rate, codecBox) {
 function sampleEntry(track) {
   switch (track.codecId) {
     case 'V_MPEG4/ISO/AVC':
-      return visualEntry('avc1', box('avcC', track.codecPrivate));
+      return visualEntry('avc1', track, box('avcC', track.codecPrivate));
+    // hvc1, not hev1: Safari accepts only hvc1 (parameter sets in hvcC,
+    // which is where MKV keeps them); Chrome takes either.
     case 'V_MPEGH/ISO/HEVC':
-      return visualEntry('hev1', box('hvcC', track.codecPrivate));
+      return visualEntry('hvc1', track, box('hvcC', track.codecPrivate));
     case 'A_AAC': {
       const { rate, channels } = parseASC(track.codecPrivate);
       const asc = track.codecPrivate.slice(0, 2);
@@ -238,10 +272,12 @@ export function initSegment(track) {
     u32(0x00010000), u16(0x0100), zeros(10),
     IDENTITY_MATRIX, zeros(24), u32(2));
 
+  // tkhd width/height: display size, 16.16 fixed point (0 for audio).
+  const disp = isVideo ? videoSize(track) : { dw: 0, dh: 0 };
   const tkhd = fullBox('tkhd', 0, 7,
     u32(0), u32(0), u32(1), u32(0), u32(0), zeros(8),
     u16(0), u16(0), isVideo ? u16(0) : u16(0x0100), u16(0),
-    IDENTITY_MATRIX, u32(0), u32(0));
+    IDENTITY_MATRIX, u32(disp.dw * 65536), u32(disp.dh * 65536));
 
   const mdhd = fullBox('mdhd', 0, 0,
     u32(0), u32(0), u32(scale), u32(0), langCode(track.language), u16(0));
@@ -288,19 +324,33 @@ function estimateDuration(track, pts) {
   return track.type === 'audio' ? 1024 : Math.round(timescaleFor(track) / 25);
 }
 
+// Frame duration in timescale ticks for a track with fixed-size frames, or
+// the smallest PTS step of the given samples (see estimateDuration).
+export function frameDuration(track, samples = []) {
+  const scale = timescaleFor(track);
+  return estimateDuration(track, samples.map(s => Math.round(s.timestamp * scale)));
+}
+
 // baseDecodeTime is in the track's timescale (see decodeTime); rounded so
 // a fractional value can't reach BigInt in u64().
-export function fragment(track, samples, baseDecodeTime, seqNum = 1) {
+// opts.durations: per-sample durations in ticks (decode-time deltas); by
+// default one estimated duration for every sample.
+// Video samples carry their presentation time as a composition offset
+// from the decode time (negative for B-frames → trun version 1, signed).
+// Audio has no reordering: its offsets are 0 and the decode timeline is
+// the presentation timeline.
+export function fragment(track, samples, baseDecodeTime, seqNum = 1, opts = {}) {
   if (!samples.length) throw new Error('fragment needs at least one sample');
   const scale = timescaleFor(track);
   baseDecodeTime = Math.round(baseDecodeTime);
   const pts = samples.map(s => Math.round(s.timestamp * scale));
-  const dur = estimateDuration(track, pts);
-  const durations = samples.map(() => dur);
+  const dur = opts.durations ? 0 : estimateDuration(track, pts);
+  const durations = opts.durations ?? samples.map(() => dur);
+  if (durations.length !== samples.length) throw new Error('fragment: one duration per sample');
 
   let dts = baseDecodeTime;
   const cts = pts.map((p, i) => {
-    const c = p - dts;
+    const c = track.type === 'video' ? p - dts : 0;
     dts += durations[i];
     return c;
   });

@@ -40,6 +40,13 @@ const ID_CUE_TIME = 0xb3;
 const ID_CUE_TRACK_POSITIONS = 0xb7;
 const ID_CUE_TRACK = 0xf7;
 const ID_CUE_CLUSTER_POSITION = 0xf1;
+// TrackEntry → Video
+const ID_VIDEO = 0xe0;
+const ID_PIXEL_WIDTH = 0xb0;
+const ID_PIXEL_HEIGHT = 0xba;
+const ID_DISPLAY_WIDTH = 0x54b0;
+const ID_DISPLAY_HEIGHT = 0x54ba;
+const ID_DISPLAY_UNIT = 0x54b2;
 // Cluster-skip fallback reads only headers: small fetches per cluster.
 const SKIP_CHUNK = 4 * 1024;
 
@@ -79,6 +86,9 @@ export class MkvDemuxer {
     // share or reset each other's window.
     this.stream = this.newStream();
     this.canPlayAudio = typeof opts.canPlayAudio === 'function' ? opts.canPlayAudio : audioSupport();
+    // opts.canPlayVideo(track) => boolean: the browser can decode it (the
+    // codec is also one the muxer handles: VIDEO_OK).
+    this.canPlayVideo = typeof opts.canPlayVideo === 'function' ? opts.canPlayVideo : () => true;
     this.tracks = null;
     this.timecodeScale = 1_000_000;
     this.infoDuration = 0;
@@ -158,6 +168,13 @@ export class MkvDemuxer {
     for (const t of this.tracks) {
       if (t.type === 'video' && !VIDEO_OK.has(t.codecId)) {
         throw new UnsupportedError(`Unsupported video codec: ${t.codecId}`);
+      }
+      if (t.type === 'video') {
+        let ok = false;
+        try {
+          ok = !!this.canPlayVideo(t);
+        } catch {}
+        if (!ok) throw new UnsupportedError(`Unsupported video codec: ${t.codecId} (this browser has no decoder for it)`);
       }
       if (t.type === 'audio') {
         try {
@@ -380,9 +397,38 @@ export class MkvDemuxer {
       else if (h.id === ID_CODEC_PRIVATE) t.codecPrivate = body;
       else if (h.id === ID_LANGUAGE) t.language = strOf(body);
       else if (h.id === ID_NAME) t.name = strOf(body);
+      else if (h.id === ID_VIDEO) this.parseVideo(t, body);
       p = v + h.size;
     }
     return t;
+  }
+
+  // Video element (a copy of its payload): coded size, and display size
+  // when given in pixels (DisplayUnit 0) or as an aspect ratio (unit 3).
+  parseVideo(t, body) {
+    let dw = 0;
+    let dh = 0;
+    let unit = 0;
+    for (let p = 0; p < body.length;) {
+      const h = readElementHeader(body, p);
+      const v = uintOf(body.slice(p + h.headerSize, p + h.headerSize + h.size));
+      if (h.id === ID_PIXEL_WIDTH) t.width = v;
+      else if (h.id === ID_PIXEL_HEIGHT) t.height = v;
+      else if (h.id === ID_DISPLAY_WIDTH) dw = v;
+      else if (h.id === ID_DISPLAY_HEIGHT) dh = v;
+      else if (h.id === ID_DISPLAY_UNIT) unit = v;
+      p += h.headerSize + h.size;
+    }
+    if (dw > 0 && dh > 0 && t.width > 0 && t.height > 0) {
+      if (unit === 0) {
+        t.displayWidth = dw;
+        t.displayHeight = dh;
+      } else if (unit === 3) {
+        // aspect ratio: keep the coded height, widen/narrow to the ratio
+        t.displayHeight = t.height;
+        t.displayWidth = Math.round((t.height * dw) / dh);
+      }
+    }
   }
 
   durationSec() {

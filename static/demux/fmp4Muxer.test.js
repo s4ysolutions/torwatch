@@ -214,7 +214,7 @@ test('codecString for synthetic HEVC track (big-endian compat, full constraints)
     0xf0, 0x00, 0xfc, 0xfd, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b,
   ]);
   const track = { type: 'video', codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: hvcC, language: 'und' };
-  assert.equal(codecString(track), 'hev1.1.12345678.L120.b00000000000');
+  assert.equal(codecString(track), 'hvc1.1.12345678.L120.b00000000000');
 });
 
 test('codecString for synthetic HEVC track pads small compat to 8 hex digits', () => {
@@ -226,7 +226,7 @@ test('codecString for synthetic HEVC track pads small compat to 8 hex digits', (
     0xf0, 0x00, 0xfc, 0xfd, 0x00, 0x00, 0x03, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b,
   ]);
   const track = { type: 'video', codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: hvcC, language: 'und' };
-  assert.equal(codecString(track), 'hev1.1.00000001.L120.b00000000000');
+  assert.equal(codecString(track), 'hvc1.1.00000001.L120.b00000000000');
 });
 
 test('MP3 track: codecString and 44100 mdhd timescale', () => {
@@ -289,4 +289,80 @@ test('fragment rounds a fractional baseDecodeTime instead of throwing', () => {
   const frag = fragment(track, [{ timestamp: 0.009, keyframe: true, data: new Uint8Array(4) }], 0.009 * 90000);
   const tfdt = findBox(frag, 'tfdt');
   assert.equal(Number(new DataView(tfdt.buffer, tfdt.byteOffset, tfdt.length).getBigUint64(12)), 810);
+});
+
+// --- video sample entry: size, matrix, aspect, HEVC tag ---
+
+const avcTrack = (extra = {}) => ({
+  number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 30, 255]),
+  language: 'und', width: 1920, height: 1080, ...extra,
+});
+const u32At = (b, off) => new DataView(b.buffer, b.byteOffset, b.length).getUint32(off);
+
+test('mvhd and tkhd carry an identity matrix', () => {
+  const init = initSegment(avcTrack());
+  const identity = [0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000];
+  // mvhd v0: size type v/f ctime mtime scale dur rate(4) volume(2) res(10) → matrix at 44
+  const mvhd = findBox(init, 'mvhd');
+  assert.deepEqual(identity.map((_, i) => u32At(mvhd, 44 + i * 4)), identity);
+  // tkhd v0: size type v/f ctime mtime id res dur res(8) layer alt vol res → matrix at 48
+  const tkhd = findBox(init, 'tkhd');
+  assert.deepEqual(identity.map((_, i) => u32At(tkhd, 48 + i * 4)), identity);
+});
+
+test('video sample entry and tkhd carry the real size (0x0 is rejected by browsers)', () => {
+  const init = initSegment(avcTrack());
+  const avc1 = findBox(init, 'avc1');
+  // avc1: size type res(6) dri(2) predef/res(16) width(2) height(2)
+  const dv = new DataView(avc1.buffer, avc1.byteOffset, avc1.length);
+  assert.deepEqual([dv.getUint16(32), dv.getUint16(34)], [1920, 1080]);
+  const tkhd = findBox(init, 'tkhd');
+  assert.deepEqual([u32At(tkhd, 84) / 65536, u32At(tkhd, 88) / 65536], [1920, 1080]);
+  assert.equal(findBox(init, 'pasp'), null); // square pixels: no pasp
+});
+
+test('anamorphic video gets pasp and a display-size tkhd', () => {
+  const init = initSegment(avcTrack({ width: 720, height: 576, displayWidth: 1024, displayHeight: 576 }));
+  const pasp = findBox(init, 'pasp');
+  assert.ok(pasp);
+  assert.deepEqual([u32At(pasp, 8), u32At(pasp, 12)], [64, 45]);
+  const tkhd = findBox(init, 'tkhd');
+  assert.deepEqual([u32At(tkhd, 84) / 65536, u32At(tkhd, 88) / 65536], [1024, 576]);
+});
+
+test('video track without a pixel size fails loudly', () => {
+  assert.throws(() => initSegment(avcTrack({ width: 0, height: 0 })), /no pixel size/);
+});
+
+test('HEVC uses the hvc1 sample entry (Safari rejects hev1)', () => {
+  const hvcC = new Uint8Array(23);
+  hvcC[0] = 1;
+  hvcC[1] = 1;
+  hvcC[12] = 120;
+  const init = initSegment(avcTrack({ codecId: 'V_MPEGH/ISO/HEVC', codecPrivate: hvcC }));
+  assert.ok(containsBox(init, 'hvc1'));
+  assert.ok(!containsBox(init, 'hev1'));
+});
+
+test('video fragment: given durations, signed composition offsets (trun v1)', () => {
+  const track = avcTrack();
+  // decode order I P B: PTS 0, 0.08, 0.04; DTS 0, 0.04, 0.08 (sorted PTS)
+  const samples = [0, 0.08, 0.04].map((timestamp, i) => ({ timestamp, keyframe: i === 0, data: new Uint8Array(4) }));
+  const frag = fragment(track, samples, 0, 7, { durations: [3600, 3600, 3600] });
+  const trun = findBox(frag, 'trun');
+  const dv = new DataView(trun.buffer, trun.byteOffset, trun.length);
+  assert.equal(dv.getUint8(8), 1, 'version 1: signed offsets');
+  const cts = [0, 1, 2].map((i) => dv.getInt32(20 + i * 16 + 12));
+  assert.deepEqual(cts, [0, 7200 - 3600, 3600 - 7200]); // pts - dts
+  assert.equal(u32At(findBox(frag, 'mfhd'), 12), 7); // sequence number
+});
+
+test('audio fragment: composition offsets are always 0', () => {
+  const track = { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x11, 0x90]), language: 'und' };
+  // ms-rounded timestamps jitter around the 1024-sample grid
+  const samples = [0, 0.021, 0.043].map((timestamp) => ({ timestamp, keyframe: true, data: new Uint8Array(4) }));
+  const trun = findBox(fragment(track, samples, 0), 'trun');
+  const dv = new DataView(trun.buffer, trun.byteOffset, trun.length);
+  assert.equal(dv.getUint8(8), 0);
+  assert.deepEqual([0, 1, 2].map((i) => dv.getUint32(20 + i * 16 + 12)), [0, 0, 0]);
 });

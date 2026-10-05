@@ -76,7 +76,12 @@ first clusters; no full download. H264 must be AVCC (the Matroska mapping for
 converted. Seek = look up the cluster in Cues (via SeekHead; without Cues, hop
 cluster headers), reset the SourceBuffer, stream from that cluster. Embedded
 subtitle cues are collected from the same playback stream, never by a second
-pass over the file. Unsupported layouts (ordered chapters, header-stripped
+pass over the file. MKV has presentation times only; MSE needs decode
+times: video samples stay in file (decode) order and decode at the sorted
+presentation times (B-frames get negative, signed composition offsets);
+audio gets a continuous fixed-frame timeline (`static/player/fragmenter.js`).
+The sample entry carries the MKV pixel size (browsers reject 0x0) and a
+`pasp` box for anamorphic video; HEVC is tagged `hvc1` (Safari). Unsupported layouts (ordered chapters, header-stripped
 codecs, non-MSE codecs) → clear error message + offer raw file download.
 
 Audio is decided per track. AC-3/E-AC-3 are muxed into fMP4 as-is

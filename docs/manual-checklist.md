@@ -4,6 +4,15 @@ Build under test: `torwatchd-linux-arm64` (see `deploy/build-arm64.sh`)
 or local `go run ./cmd/torwatchd`. Defaults: `-addr :8080 -static static
 -data data -ttl 24h -max-disk 20GB` (see `cmd/torwatchd/main.go`).
 
+## Before a browser run: verify the MKV→fMP4 remux
+
+`npm run verify:remux -- <file.mkv> [seekSec]` (needs ffmpeg) streams the
+file through the real pipeline (MkvDemuxer + msePlayer) in node, then has
+ffmpeg decode the result and compares every video frame and every audio
+packet with the source. It catches decode-order, timestamp and payload
+errors without a browser; container details browsers are stricter about
+(sample entry size, matrix) are covered by `npm test`.
+
 ## Core cases (per plan)
 
 ### 1. MP4 magnet plays via native player, subs upload works

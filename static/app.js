@@ -32,6 +32,7 @@ import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
 import { MkvDemuxer, finishCues } from './demux/mkvDemuxer.js';
 import { audioSupport } from './demux/codecs.js';
+import { codecString } from './demux/fmp4Muxer.js';
 import { createMsePlayer } from './player/msePlayer.js';
 import { createNativePlayer } from './player/nativePlayer.js';
 import { inputCardView } from './views/inputCardView.js';
@@ -63,6 +64,9 @@ const normId = (s) => String(s).toLowerCase();
 
 // AC-3/E-AC-3 pass through to MSE only where the browser decodes them.
 const canPlayAudio = audioSupport((mime) => globalThis.MediaSource?.isTypeSupported?.(mime) ?? false);
+// Video (H.264/HEVC) likewise: HEVC decodes only in Safari and in Chrome
+// with hardware support; refuse up front with a clear message.
+const canPlayVideo = (t) => globalThis.MediaSource?.isTypeSupported?.(`video/mp4; codecs="${codecString(t)}"`) ?? false;
 
 // Capability check runs *before* selecting the engine (client creation is
 // lazy, so try/catch around the factory cannot catch it).
@@ -393,7 +397,7 @@ function mountPlay({ id: rawId, file }) {
       if (/\.mkv$/i.test(name)) {
         // Demux + MSE path (multi-audio/subs need track switching).
         const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex);
-        demuxer = new MkvDemuxer(fetchRange, { canPlayAudio });
+        demuxer = new MkvDemuxer(fetchRange, { canPlayAudio, canPlayVideo });
         const { tracks: htracks } = await demuxer.readHeader();
         if (cancelled) return;
         const audio = htracks.filter((t) => t.type === 'audio');

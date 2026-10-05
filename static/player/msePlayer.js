@@ -1,5 +1,6 @@
-import { initSegment, fragment, codecString, decodeTime } from '../demux/fmp4Muxer.js';
-import { drainGroups, finalizePlayback } from './mseHelpers.js';
+import { initSegment, codecString } from '../demux/fmp4Muxer.js';
+import { finalizePlayback } from './mseHelpers.js';
+import { createFragmenter } from './fragmenter.js';
 
 // MSE player: demuxed MKV → fMP4 fragments → one video + one audio
 // SourceBuffer.
@@ -110,18 +111,18 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   }
 
   async function pump(gen, fromSec) {
-    // gather samples for video + activeAudio, group per 1s per track
+    // Fragments per track in decode order (see fragmenter.js); a new pump
+    // (seek, audio switch) starts new timelines.
+    const vfrag = createFragmenter(videoTrack, (data) => {
+      queue.push({ buf: vbuf, kind: 'append', data });
+      runQueue();
+    });
+    const afrag = createFragmenter(activeAudio, (data) => {
+      queue.push({ buf: abuf, kind: 'append', data });
+      runQueue();
+    });
     const sel = [videoTrack.number, activeAudio.number, ...subtitleNums];
     const isSub = new Set(subtitleNums);
-    const groups = new Map(); // trackNumber -> samples[]
-    const emit = (key, batch) => {
-      const tn = +String(key).split(':')[0];
-      const track = tn === videoTrack.number ? videoTrack : activeAudio;
-      const buf = tn === videoTrack.number ? vbuf : abuf;
-      // tfdt is in the track's own timescale (90k video, sample rate audio).
-      queue.push({ buf, kind: 'append', data: fragment(track, batch, decodeTime(track, batch[0].timestamp)) });
-      runQueue();
-    };
     try {
       for await (const s of demuxer.samples(fromSec, demuxer.durationSec(), sel)) {
         if (gen !== generation) return; // stale
@@ -135,17 +136,10 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
           try {
             onSubtitle(s);
           } catch {}
-          continue;
-        }
-        const key = s.trackNumber + ':' + Math.floor(s.timestamp);
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(s);
-        for (const [k, samples] of groups) {
-          const tn = +k.split(':')[0];
-          const track = tn === videoTrack.number ? videoTrack : activeAudio;
-          if (samples.length >= (track.type === 'video' ? 24 : 43) || samples.at(-1).timestamp - samples[0].timestamp >= 1) {
-            emit(k, samples.splice(0));
-          }
+        } else if (s.trackNumber === videoTrack.number) {
+          vfrag.push(s);
+        } else {
+          afrag.push(s);
         }
       }
     } catch (e) {
@@ -153,11 +147,16 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       // (gen now stale) skips flush/endOfStream, and surface one error.
       if (gen === generation) halt(e);
     } finally {
-      // Flush trailing partial groups, then endOfStream once idle.
+      // Flush what is pending, then endOfStream once idle.
       if (gen === generation) {
-        drainGroups(groups, emit);
-        eosPending = true;
-        runQueue();
+        try {
+          vfrag.flush();
+          afrag.flush();
+          eosPending = true;
+          runQueue();
+        } catch (e) {
+          halt(e);
+        }
       }
     }
   }

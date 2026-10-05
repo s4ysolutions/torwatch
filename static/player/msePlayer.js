@@ -6,6 +6,10 @@ import { drainGroups, finalizePlayback } from '../views/videoStageView.js';
 
 export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   const onError = typeof hooks.onError === 'function' ? hooks.onError : () => {};
+  // Subtitle blocks ride along in the playback stream (no second walk of
+  // the file); each one is handed to hooks.onSubtitle(sample).
+  const onSubtitle = typeof hooks.onSubtitle === 'function' ? hooks.onSubtitle : null;
+  const subtitleNums = onSubtitle ? trackList.filter(t => t.type === 'subtitle').map(t => t.number) : [];
   // Halt the pipeline exactly once: stale every in-flight pump and drop
   // queued appends so a dead demuxer/buffer can't cascade exceptions.
   function halt(e) {
@@ -81,7 +85,8 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
 
   async function pump(gen, fromSec) {
     // gather samples for video + activeAudio, group per 1s per track
-    const sel = [videoTrack.number, activeAudio.number];
+    const sel = [videoTrack.number, activeAudio.number, ...subtitleNums];
+    const isSub = new Set(subtitleNums);
     const groups = new Map(); // trackNumber -> samples[]
     const emit = (key, batch) => {
       const tn = +String(key).split(':')[0];
@@ -100,6 +105,12 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
           await waitForDrain();
         }
         if (gen !== generation) return; // stale
+        if (isSub.has(s.trackNumber)) {
+          try {
+            onSubtitle(s);
+          } catch {}
+          continue;
+        }
         const key = s.trackNumber + ':' + Math.floor(s.timestamp);
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(s);
@@ -135,7 +146,26 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   }
   ms.addEventListener('sourceopen', () => { attach(); pump(generation, videoEl.currentTime || 0); });
 
-  return {
+  // Native controls seek by setting currentTime. A target outside what is
+  // buffered needs the pump restarted there; the pump otherwise walks on
+  // linearly and the jump would stall until it caught up.
+  let ownSeekTarget = null;
+  function isBuffered(t) {
+    try {
+      const b = videoEl.buffered;
+      for (let i = 0; i < b.length; i++) if (t >= b.start(i) && t <= b.end(i)) return true;
+    } catch {}
+    return false;
+  }
+  const onSeeking = () => {
+    const t = videoEl.currentTime || 0;
+    if (ownSeekTarget != null && Math.abs(t - ownSeekTarget) < 0.05) return;
+    if (!vbuf || !abuf || isBuffered(t)) return;
+    api.seek(t);
+  };
+  if (typeof videoEl.addEventListener === 'function') videoEl.addEventListener('seeking', onSeeking);
+
+  const api = {
     play: () => videoEl.play(),
     pause: () => videoEl.pause(),
     seek(sec) {
@@ -154,6 +184,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       for (const b of [vbuf, abuf]) if (b?.updating) b.abort();
       vbuf.remove(0, Infinity);
       abuf.remove(0, Infinity);
+      ownSeekTarget = sec;
       videoEl.currentTime = sec;
       // re-append init segments then pump from sec
       queue.push({ buf: vbuf, data: initSegment(videoTrack) }, { buf: abuf, data: initSegment(activeAudio) });
@@ -180,10 +211,12 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
     duration: () => demuxer.durationSec(),
     dispose() {
       generation++;
+      if (typeof videoEl.removeEventListener === 'function') videoEl.removeEventListener('seeking', onSeeking);
       eosPending = false;
       videoEl.pause();
       URL.revokeObjectURL(videoEl.src);
       videoEl.removeAttribute('src');
     },
   };
+  return api;
 }

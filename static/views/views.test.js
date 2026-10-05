@@ -28,6 +28,7 @@ function makeStubEl(tag) {
     removeAttribute(k) { delete attrs[k]; },
     addEventListener(t, fn) { (listeners[t] ??= []).push(fn); },
     removeEventListener() {},
+    async __fire(t, ev) { for (const fn of listeners[t] ?? []) await fn(ev); },
     remove() { this.removed = true; },
     querySelectorAll(sel) {
       const m = /^(\w+)(?:\[name="([^"]+)"\])?$/.exec(String(sel));
@@ -146,5 +147,23 @@ test('downloadsRow uses videoName for the download attribute', () => {
     const a = walk(row).find(n => n.tagName === 'A');
     assert.ok(a, 'video link missing');
     assert.equal(a.attrs.download, 'm.mkv');
+  } finally { restore(); }
+});
+
+test('downloadsRow lazy video resolves only on click, then downloads', async () => {
+  const restore = installStub();
+  try {
+    let calls = 0;
+    const row = downloadsRow(() => ({ getVideo: async () => { calls++; return { url: 'blob:v', name: 'm.mkv' }; } }));
+    const a = walk(row).find(n => n.tagName === 'A');
+    assert.ok(a, 'video link missing');
+    assert.equal(calls, 0); // nothing built at render
+    let clicked = 0;
+    a.click = () => { clicked++; };
+    await a.__fire('click', { preventDefault() {} });
+    assert.equal(calls, 1);
+    assert.equal(a.attrs.href, 'blob:v');
+    assert.equal(a.attrs.download, 'm.mkv');
+    assert.equal(clicked, 1);
   } finally { restore(); }
 });

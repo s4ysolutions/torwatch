@@ -22,6 +22,8 @@ export function backendAdapter(fetchImpl = fetch) {
         try { videoEl.removeAttribute('src'); videoEl.load(); } catch {}
       };
     },
+    // Direct URL: downloading needs no preparation on this engine.
+    downloadUrl: (id, index) => `/api/magnets/${id}/files/${index}`,
     async downloadFile(id, index) {
       let name = `file-${index}`;
       try {

@@ -30,7 +30,7 @@ import { el } from './util/dom.js';
 import { cachingFetchRange } from './usecases/cacheFile.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
-import { MkvDemuxer, UnsupportedError } from './demux/mkvDemuxer.js';
+import { MkvDemuxer, finishCues } from './demux/mkvDemuxer.js';
 import { audioSupport } from './demux/codecs.js';
 import { createMsePlayer } from './player/msePlayer.js';
 import { createNativePlayer } from './player/nativePlayer.js';
@@ -39,7 +39,7 @@ import { statusBar } from './views/statusBar.js';
 import { videoStageView } from './views/videoStageView.js';
 import { tracksMenu } from './views/tracksMenu.js';
 import { subtitlesWidget } from './views/subtitlesWidget.js';
-import { downloadsRow } from './views/downloadsRow.js';
+import { downloadsRow, lazyDownloadLink } from './views/downloadsRow.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -96,11 +96,21 @@ function clear(node) {
 
 // Unplayable torrent (e.g. all .avi): the error goes to the status bar and
 // every file gets a direct download link below the card.
-let homeGen = 0;
 let fileLinkUrls = [];
-async function showFileLinks(info) {
-  const myGen = ++homeGen;
-  const stillCurrent = () => myGen === homeGen;
+// Video download for one file. Server engine: a plain URL. Browser engine:
+// the Blob (whole file in memory) is built only when the link is clicked;
+// its object URL goes to blobUrls for the caller to revoke.
+function lazyFileSource(id, index, name, blobUrls) {
+  return async () => {
+    const dl = await adapter.downloadFile(id, index);
+    if (dl.url) return { url: dl.url, name };
+    const url = URL.createObjectURL(dl.blob);
+    blobUrls.push(url);
+    return { url, name };
+  };
+}
+
+function showFileLinks(info) {
   const host = $('dl');
   if (!host || !info) return;
   clear(host);
@@ -109,32 +119,20 @@ async function showFileLinks(info) {
   }
   const row = el('div', { class: 'downloads' });
   host.appendChild(row);
+  const id = normId(info.id);
   for (const f of info.files ?? []) {
-    if (!stillCurrent()) return;
     const name = String(f.path ?? `file-${f.index}`).split('/').pop();
-    const mb = Math.round((f.size ?? 0) / 1048576);
-    let href = null;
-    try {
-      const dl = await adapter.downloadFile(normId(info.id), f.index);
-      if (!stillCurrent()) return;
-      if (dl.url) href = dl.url;
-      else if (dl.blob) {
-        href = URL.createObjectURL(dl.blob);
-        fileLinkUrls.push(href);
-      }
-    } catch { if (!stillCurrent()) return; }
-    if (!stillCurrent()) return;
-    if (!href) continue;
-    row.appendChild(el('a', {
-      href,
-      download: name,
-    }, `⬇ ${name} (${mb} MB)`));
+    const label = `⬇ ${name} (${Math.round((f.size ?? 0) / 1048576)} MB)`;
+    const direct = adapter.downloadUrl?.(id, f.index);
+    row.appendChild(direct
+      ? el('a', { href: direct, download: name }, label)
+      : lazyDownloadLink(label, lazyFileSource(id, f.index, name, fileLinkUrls)));
   }
 }
 
 function failWithFiles(e) {
   fail(e);
-  if (e instanceof NoPlayableError) void showFileLinks(e.info);
+  if (e instanceof NoPlayableError) showFileLinks(e.info);
 }
 
 async function submitMagnet(magnet) {
@@ -197,7 +195,6 @@ function toSrt(cues) {
 
 function mountHome() {
   playerState.set({ ...playerState.get(), phase: 'idle', error: null });
-  homeGen++;
   fileLinkUrls = [];
   const host = $('card');
   clear(host);
@@ -218,7 +215,6 @@ function mountHome() {
     },
   });
   return () => {
-    homeGen++;
     for (const u of fileLinkUrls.splice(0)) {
       try { URL.revokeObjectURL(u); } catch {}
     }
@@ -247,7 +243,32 @@ function mountPlay({ id: rawId, file }) {
   let cancelled = false;
   let player = null;
   let demuxer = null;
-  const embeddedByLabel = new Map(); // subtitle label -> demuxer trackNumber
+  // Embedded subtitle cues arrive with the playback stream (msePlayer
+  // onSubtitle) — the file is never walked a second time just for them.
+  // trackNumber -> Map(key -> cue); flushed into `tracks` at most 2x/s.
+  const embeddedCues = new Map();
+  let subsFlushTimer = null;
+  function flushEmbeddedSubs() {
+    subsFlushTimer = null;
+    if (cancelled) return;
+    const now = tracks.get();
+    tracks.set({
+      ...now,
+      subtitles: now.subtitles.map((s) =>
+        s.embedded != null && embeddedCues.has(s.embedded)
+          ? { ...s, cues: finishCues([...embeddedCues.get(s.embedded).values()]) }
+          : s),
+    });
+  }
+  function onEmbeddedSubtitle(sample) {
+    if (cancelled || !demuxer) return;
+    const cue = demuxer.subtitleCue(sample);
+    let m = embeddedCues.get(sample.trackNumber);
+    if (!m) embeddedCues.set(sample.trackNumber, (m = new Map()));
+    m.set(`${cue.start}|${cue.text}`, cue); // re-walks after a seek dedupe
+    if (!subsFlushTimer) subsFlushTimer = setTimeout(flushEmbeddedSubs, 500);
+  }
+  on(() => clearTimeout(subsFlushTimer));
 
   if (!id || !Number.isInteger(fileIndex) || fileIndex < 0) {
     fail(new Error('bad play route — go back and Watch again'));
@@ -302,20 +323,6 @@ function mountPlay({ id: rawId, file }) {
         if (cur.activeSubtitle === label) tracks.set({ ...cur, activeSubtitle: null });
         return;
       }
-      const entry = cur.subtitles.find((s) => s.label === label);
-      // Embedded track listed but cues not loaded yet → load in place
-      // (replace the placeholder; never push a duplicate entry).
-      if (entry && !entry.cues?.length && embeddedByLabel.has(label) && demuxer) {
-        const cues = await demuxer.subtitleCues(embeddedByLabel.get(label));
-        if (cancelled) return;
-        const now = tracks.get();
-        tracks.set({
-          ...now,
-          subtitles: now.subtitles.map((s) => (s.label === label ? { ...s, cues } : s)),
-          activeSubtitle: label,
-        });
-        return;
-      }
       tracks.set({ ...cur, activeSubtitle: label });
     } catch (e) {
       fail(e);
@@ -336,18 +343,25 @@ function mountPlay({ id: rawId, file }) {
   // Downloads row (C3: pull-once — re-invoke on state change, not reactive).
   let dlDispose = null;
   let srtUrl = null;
-  let dlGen = 0;
   const videoBlobUrls = [];
-  const renderDl = async () => {
-    const gen = ++dlGen;
-    const stillCurrent = () => !cancelled && gen === dlGen;
+  // One lazy source per mount: re-renders (every subtitle flush) reuse it,
+  // so a click never builds the file twice; its blob URL lives until
+  // unmount.
+  let fileName = `file-${fileIndex}`;
+  let videoSource = null;
+  const getVideo = () => {
+    videoSource ??= lazyFileSource(id, fileIndex, fileName, videoBlobUrls)().catch((e) => {
+      videoSource = null;
+      throw e;
+    });
+    return videoSource;
+  };
+  const renderDl = () => {
+    if (cancelled) return;
     try {
       if (typeof dlDispose === 'function') dlDispose();
     } catch {}
     dlDispose = null;
-    for (const u of videoBlobUrls.splice(0)) {
-      try { URL.revokeObjectURL(u); } catch {}
-    }
     if (srtUrl) {
       try {
         URL.revokeObjectURL(srtUrl);
@@ -365,22 +379,13 @@ function mountPlay({ id: rawId, file }) {
         srtLabel = active.label || '.srt';
       } catch {}
     }
-    let videoHref = null, videoName = 'video';
-    try {
-      const dl = await adapter.downloadFile(id, fileIndex);
-      if (!stillCurrent()) return;
-      videoName = dl.name || videoName;
-      videoHref = dl.url ?? URL.createObjectURL(dl.blob);
-      if (!dl.url) videoBlobUrls.push(videoHref);
-    } catch { if (!stillCurrent()) return; }
-    if (!stillCurrent()) return;
-    dlDispose = downloadsRow(dlHost, () => ({ videoUrl: videoHref, videoName, srtUrl: srtLink, srtLabel }));
+    const videoUrl = adapter.downloadUrl?.(id, fileIndex) ?? null;
+    dlDispose = downloadsRow(dlHost, () => ({ videoUrl, videoName: fileName, getVideo, srtUrl: srtLink, srtLabel }));
   };
-  void renderDl();
+  renderDl();
   on(tracks.subscribe(renderDl));
   on(playerState.subscribe(renderDl));
   on(() => {
-    dlGen++;
     try {
       if (typeof dlDispose === 'function') dlDispose();
     } catch {}
@@ -405,6 +410,7 @@ function mountPlay({ id: rawId, file }) {
       if (cancelled) return;
       const f = (info.files ?? []).find((x) => x.index === fileIndex);
       const name = f?.path ?? `file-${fileIndex}`;
+      fileName = String(name).split('/').pop() || fileName;
       if (/\.mkv$/i.test(name)) {
         // Demux + MSE path (multi-audio/subs need track switching).
         const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex);
@@ -414,7 +420,6 @@ function mountPlay({ id: rawId, file }) {
         const audio = htracks.filter((t) => t.type === 'audio');
         const firstPlayable = audio.find((t) => t.playable !== false);
         const subs = htracks.filter((t) => t.type === 'subtitle');
-        for (const t of subs) embeddedByLabel.set(t.name || t.language || `Track ${t.number}`, t.number);
         tracks.set({
           audio: audio.map((t) => ({
             number: t.number,
@@ -423,7 +428,8 @@ function mountPlay({ id: rawId, file }) {
             codecId: t.codecId,
             playable: t.playable !== false,
           })),
-          subtitles: subs.map((t) => ({ label: t.name || t.language || `Track ${t.number}` })),
+          // cues fill in as playback streams past them
+          subtitles: subs.map((t) => ({ label: t.name || t.language || `Track ${t.number}`, embedded: t.number, cues: [] })),
           activeAudio: firstPlayable ? firstPlayable.number : null,
           activeSubtitle: null,
         });
@@ -434,6 +440,7 @@ function mountPlay({ id: rawId, file }) {
           if (cancelled) return;
         }
         player = createMsePlayer(video, demuxer, htracks, {
+          onSubtitle: onEmbeddedSubtitle,
           onError: (e) => {
             if (!cancelled) fail(e);
           },
@@ -458,7 +465,6 @@ function mountPlay({ id: rawId, file }) {
 
   return () => {
     cancelled = true;
-    dlGen++;
     for (const off of disposers.splice(0)) {
       try {
         off();

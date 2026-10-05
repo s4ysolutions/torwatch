@@ -105,18 +105,30 @@ test('opfs read miss returns null', async () => {
   assert.equal(await o.read('nope', 0, 1), null);
 });
 
-test('opfs memory fallback sparse write zero-fills gap', async () => {
+test('opfs gap is a miss, never zero-filled', async () => {
   const o = opfsAdapter(null);
   await o.write('m1', 0, new Uint8Array([1]));
   await o.write('m1', 3, new Uint8Array([4]));
-  assert.deepEqual([...await o.read('m1', 0, 3)], [1, 0, 0, 4]);
+  assert.equal(await o.read('m1', 0, 3), null); // bytes 1..2 never written
+  assert.equal(await o.read('m1', 1, 1), null);
+  assert.deepEqual([...await o.read('m1', 3, 3)], [4]);
 });
 
-test('opfs memory fallback overlapping write overwrites', async () => {
+test('opfs read past covered end is a miss until eof is known', async () => {
+  const o = opfsAdapter(null);
+  await o.write('m1', 0, new Uint8Array([1, 2]));
+  assert.equal(await o.read('m1', 0, 9), null);
+  await o.setEof('m1', 2);
+  assert.deepEqual([...await o.read('m1', 0, 9)], [1, 2]);
+  assert.equal((await o.read('m1', 5, 9)).length, 0); // past eof: empty = EOF
+});
+
+test('opfs read stitches adjacent and overlapping chunks', async () => {
   const o = opfsAdapter(null);
   await o.write('m1', 0, new Uint8Array([1, 2, 3, 4]));
-  await o.write('m1', 1, new Uint8Array([9, 9]));
-  assert.deepEqual([...await o.read('m1', 0, 3)], [1, 9, 9, 4]);
+  await o.write('m1', 2, new Uint8Array([3, 4, 5, 6]));
+  await o.write('m1', 6, new Uint8Array([7]));
+  assert.deepEqual([...await o.read('m1', 1, 6)], [2, 3, 4, 5, 6, 7]);
 });
 
 test('opfs memory fallback remove/stat-miss/listIds', async () => {
@@ -149,46 +161,70 @@ test('opfs memory fallback: 1000 sequential 1KB writes stay fast and correct', a
   }
 });
 
-test('opfs positional write uses seek when the stream supports it', async () => {
-  const store = new Map();
-  const ops = [];
-  const root = {
-    async getFileHandle(n, opts) {
-      if (!store.has(n) && !opts?.create) {
-        const e = new Error('missing');
-        e.name = 'NotFoundError';
-        throw e;
-      }
-      if (!store.has(n)) store.set(n, new Uint8Array(0));
+// Minimal OPFS directory fake: dirs of files, File.slice/text/size.
+function fakeOpfsRoot() {
+  const notFound = () => Object.assign(new Error('missing'), { name: 'NotFoundError' });
+  const fileHandle = (store, name) => ({
+    kind: 'file',
+    async getFile() {
+      const b = store.get(name);
       return {
-        async getFile() {
-          const cur = store.get(n);
-          return { arrayBuffer: async () => cur.slice().buffer, size: cur.length };
-        },
-        async createWritable() {
-          let pos = 0;
-          return {
-            async seek(p) { ops.push(['seek', p]); pos = p; },
-            async write(chunk) {
-              ops.push(['write', pos, chunk.length]);
-              const cur = store.get(n);
-              const next = new Uint8Array(Math.max(cur.length, pos + chunk.length));
-              next.set(cur, 0);
-              next.set(chunk, pos);
-              store.set(n, next);
-              pos += chunk.length;
-            },
-            async close() {},
-          };
-        },
+        size: b.length,
+        slice: (a, z) => ({ arrayBuffer: async () => b.slice(a, z).buffer }),
+        text: async () => new TextDecoder().decode(b),
       };
     },
+    async createWritable() {
+      let data = new Uint8Array(0); // truncating, like the real default
+      return {
+        async write(c) { const n = new Uint8Array(data.length + c.length); n.set(data); n.set(c, data.length); data = n; },
+        async close() { store.set(name, data); },
+      };
+    },
+  });
+  const dirHandle = (store) => ({
+    kind: 'directory',
+    async getFileHandle(name, opts) {
+      if (!store.has(name)) {
+        if (!opts?.create) throw notFound();
+        store.set(name, new Uint8Array(0));
+      }
+      return fileHandle(store, name);
+    },
+    async *entries() { for (const n of store.keys()) yield [n, fileHandle(store, n)]; },
+  });
+  const dirs = new Map();
+  return {
+    dirs,
+    async getDirectoryHandle(name, opts) {
+      if (!dirs.has(name)) {
+        if (!opts?.create) throw notFound();
+        dirs.set(name, new Map());
+      }
+      return dirHandle(dirs.get(name));
+    },
+    async removeEntry(name) { if (!dirs.delete(name)) throw notFound(); },
+    async *keys() { yield* dirs.keys(); },
   };
+}
+
+test('opfs stores one file per chunk and survives a reload', async () => {
+  const root = fakeOpfsRoot();
   const o = opfsAdapter(root);
-  await o.write('m1', 0, new Uint8Array([1, 2, 3]));
-  await o.write('m1', 10, new Uint8Array([9])); // sparse: no full re-write
-  assert.deepEqual(ops[2], ['seek', 10]);
-  assert.deepEqual([...await o.read('m1', 0, 10)], [1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 9]);
+  await o.write('a:0', 0, new Uint8Array([1, 2, 3]));
+  await o.write('a:0', 10, new Uint8Array([9]));
+  await o.write('a:0', 3, new Uint8Array([4, 5]));
+  await o.setEof('a:0', 11);
+  assert.deepEqual([...root.dirs.get('a%3A0').keys()].sort(), ['0', '10', '3', 'eof']);
+  // fresh adapter = page reload: index rebuilt from the directory
+  const o2 = opfsAdapter(root);
+  assert.deepEqual([...await o2.read('a:0', 0, 4)], [1, 2, 3, 4, 5]);
+  assert.equal(await o2.read('a:0', 4, 10), null); // 5..9 never written
+  assert.deepEqual([...await o2.read('a:0', 10, 20)], [9]); // clipped at eof
+  assert.deepEqual(await o2.listIds(), ['a:0']);
+  await o2.remove('a:0');
+  assert.equal(await o2.read('a:0', 0, 0), null);
+  assert.deepEqual(await o2.listIds(), []);
 });
 
 test('backend attachNative sets src and cleanup detaches', async () => {

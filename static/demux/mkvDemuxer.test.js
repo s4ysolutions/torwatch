@@ -30,7 +30,7 @@ test('subtitleCues extracts text', async () => {
   assert.ok(cues.length >= 1);
   assert.match(cues[0].text, /Hello fixture/);
   assert.equal(cues[0].start, 0);
-  assert.equal(cues[0].end, 2); // single cue: +2s fallback
+  assert.equal(cues[0].end, 1.5); // BlockDuration (srt: 0 → 1.5s)
 });
 
 test('samples yields video+audio blocks in order', async () => {
@@ -141,4 +141,75 @@ test('passthrough track whose first frame is out of probe range is unplayable', 
   const d = new MkvDemuxer(mixRange, { canPlayAudio: () => true, maxBytes: 1 });
   const { tracks } = await d.readHeader();
   assert.deepEqual(audioOf(tracks).map((t) => t.playable), [false, false, true]);
+});
+
+// --- seeking (seek.mkv: 20s, 2s clusters, keyframe every 2s, Cues) ---
+
+const seekBuf = new Uint8Array(await readFile(new URL('../../testdata/seek.mkv', import.meta.url)));
+
+function counting(bytes) {
+  const stats = { bytes: 0 };
+  const fr = async (s, e) => {
+    const out = bytes.slice(s, e + 1);
+    stats.bytes += out.length;
+    return out;
+  };
+  return { fr, stats };
+}
+
+// Rename the Cues element (ID 1C53BB6B → unknown) so the file has no index.
+function withoutCues(bytes) {
+  const b = bytes.slice();
+  for (let i = b.length - 4; i >= 0; i--) {
+    if (b[i] === 0x1c && b[i + 1] === 0x53 && b[i + 2] === 0xbb && b[i + 3] === 0x6b) {
+      b[i + 3] = 0x6c;
+      return b;
+    }
+  }
+  throw new Error('no Cues in fixture');
+}
+
+async function firstVideoAfterSeek(bytes, sec) {
+  const { fr, stats } = counting(bytes);
+  const d = new MkvDemuxer(fr, { chunkSize: 16 * 1024 });
+  const { tracks } = await d.readHeader();
+  const v = tracks.find((t) => t.type === 'video').number;
+  stats.bytes = 0; // count the seek only
+  // MSE drops leading non-key frames, so what matters is the first keyframe.
+  for await (const s of d.samples(sec, Infinity, [v])) if (s.keyframe) return { s, stats, cues: d.cues };
+  throw new Error('no samples');
+}
+
+test('seek with Cues starts at the keyframe cluster, not the file start', async () => {
+  const { s, stats, cues } = await firstVideoAfterSeek(seekBuf, 15);
+  assert.ok(cues.length >= 5, `cues parsed: ${cues.length}`);
+  assert.equal(s.keyframe, true);
+  assert.ok(s.timestamp <= 15 && s.timestamp > 12, `starts at ${s.timestamp}`);
+  assert.ok(stats.bytes < seekBuf.length / 3, `fetched ${stats.bytes} of ${seekBuf.length}`);
+});
+
+test('seek without Cues hops cluster headers instead of reading payloads', async () => {
+  const { s, stats, cues } = await firstVideoAfterSeek(withoutCues(seekBuf), 15);
+  assert.equal(cues.length, 0);
+  assert.equal(s.keyframe, true);
+  assert.ok(s.timestamp <= 15 && s.timestamp > 12, `starts at ${s.timestamp}`);
+  assert.ok(stats.bytes < seekBuf.length / 3, `fetched ${stats.bytes} of ${seekBuf.length}`);
+});
+
+test('concurrent walks do not corrupt each other (own window each)', async () => {
+  const d = new MkvDemuxer(async (s, e) => {
+    await new Promise((r) => setTimeout(r, Math.random() * 3)); // interleave fetches
+    return seekBuf.slice(s, e + 1);
+  }, { chunkSize: 8 * 1024 });
+  const { tracks } = await d.readHeader();
+  const nums = tracks.map((t) => t.number);
+  const collect = async (from) => {
+    const out = [];
+    for await (const s of d.samples(from, Infinity, nums)) out.push(`${s.trackNumber}@${s.timestamp}:${s.data.length}`);
+    return out;
+  };
+  const solo = await collect(10);
+  const [a, b] = await Promise.all([collect(0), collect(10)]);
+  assert.deepEqual(b, solo);
+  assert.ok(a.length > b.length);
 });

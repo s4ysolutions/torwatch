@@ -103,6 +103,9 @@ export function webtorrentAdapter({ clientFactory, searchSubs, announceList = PI
         try { videoEl.removeAttribute('src'); videoEl.load(); } catch {}
       };
     },
+    // No URL: the file must be assembled into a Blob (downloadFile) — only
+    // on explicit user request, it pulls the whole file into memory.
+    downloadUrl: () => null,
     async downloadFile(id, index) {
       const t = withTorrent(id);
       const f = (t?.files ?? [])[index];

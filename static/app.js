@@ -27,7 +27,7 @@ import {
   bindPosition,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
-import { cachingFetchRange } from './usecases/cacheFile.js';
+import { cachingFetchRange, pruneCache, cacheSize, clearCache } from './usecases/cacheFile.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
 import { MkvDemuxer, finishCues } from './demux/mkvDemuxer.js';
@@ -212,6 +212,7 @@ function mountHome() {
   // Toggle invariant: the toggle lives only on the home card, and home
   // mounts only at phase `idle` — so there is deliberately no mid-play
   // engine switch to handle.
+  playerState.set({ ...playerState.get(), note: null });
   const dispose = inputCardView(host, {
     onMagnet: (m) => void submitMagnet(m),
     onTorrentFile: (f) => void submitTorrent(f),
@@ -222,11 +223,31 @@ function mountHome() {
       engineStore.set('engine', v); adapter = buildAdapter(v);
     },
   });
+  // Local cache: what it holds, and a way to drop it. Played data is
+  // served from here whichever engine is selected.
+  const cacheText = el('span', {}, 'Local cache: …');
+  const clearBtn = el('button', { type: 'button', class: 'cache-clear' }, 'Clear');
+  const showSize = () => cacheSize(opfs).then(
+    (n) => { cacheText.textContent = `Local cache: ${formatBytes(n)} (served before either engine is asked)`; },
+    () => { cacheText.textContent = 'Local cache: unavailable'; },
+  );
+  clearBtn.addEventListener('click', () => {
+    clearBtn.disabled = true;
+    clearCache(opfs).then(showSize, (e) => fail(e)).finally(() => { clearBtn.disabled = false; });
+  });
+  host.appendChild(el('div', { class: 'cache-row' }, [cacheText, ' ', clearBtn]));
+  void showSize();
   return () => {
     revokeAll(fileLinkUrls);
     attempt('home card dispose', dispose);
     clear(host);
   };
+}
+
+function formatBytes(n) {
+  if (n < 1 << 20) return `${Math.round(n / 1024)} KB`;
+  if (n < 1 << 30) return `${(n / (1 << 20)).toFixed(1)} MB`;
+  return `${(n / (1 << 30)).toFixed(2)} GB`;
 }
 
 function mountPlay({ id: rawId, file }) {
@@ -236,6 +257,26 @@ function mountPlay({ id: rawId, file }) {
   const on = (off) => {
     if (typeof off === 'function') disposers.push(off);
   };
+  // Where playback bytes come from: local cache vs the selected engine.
+  const engineLabel = getEngine() === 'server' || !canUseBrowserEngine() ? 'server' : 'browser peers';
+  const bytesFrom = { cache: 0, network: 0 };
+  let sourceTimer = null;
+  const showSource = () => {
+    sourceTimer = null;
+    if (cancelled) return;
+    const total = bytesFrom.cache + bytesFrom.network;
+    if (!total) return;
+    const pct = Math.round((bytesFrom.cache / total) * 100);
+    const note = pct === 100
+      ? 'Playing from local cache'
+      : pct === 0 ? `Streaming via ${engineLabel}` : `Data: ${pct}% local cache, ${100 - pct}% ${engineLabel}`;
+    if (playerState.get().note !== note) playerState.set({ ...playerState.get(), note });
+  };
+  const countSource = (source, n) => {
+    bytesFrom[source] += n;
+    sourceTimer ??= setTimeout(showSource, 1000);
+  };
+  on(() => clearTimeout(sourceTimer));
   const stageHost = $('stage');
   const subsHost = $('subs');
   const dlHost = $('dl');
@@ -396,7 +437,7 @@ function mountPlay({ id: rawId, file }) {
       fileName = String(name).split('/').pop() || fileName;
       if (/\.mkv$/i.test(name)) {
         // Demux + MSE path (multi-audio/subs need track switching).
-        const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex);
+        const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex, { onBytes: countSource });
         demuxer = new MkvDemuxer(fetchRange, { canPlayAudio, canPlayVideo });
         const { tracks: htracks } = await demuxer.readHeader();
         if (cancelled) return;
@@ -490,6 +531,15 @@ window.addEventListener('DOMContentLoaded', async () => {
     opfs = opfsAdapter(root ?? null);
   } catch {
     opfs = opfsAdapter(null);
+  }
+  // Bound the cache: drop files unused for 7 days, then oldest-used until it
+  // fits half the storage quota (at most 4 GB).
+  try {
+    const { quota } = (await navigator.storage?.estimate?.()) ?? {};
+    const maxBytes = Math.min(quota > 0 ? quota / 2 : Infinity, 4 * 2 ** 30);
+    await pruneCache(opfs, { maxBytes });
+  } catch (e) {
+    console.warn('torwatch: cache prune failed', e);
   }
 
   // Mount-point shells carry the yt-subtitles `#status`/`#stage` styles for

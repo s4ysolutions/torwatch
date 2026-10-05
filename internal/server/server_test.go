@@ -100,3 +100,16 @@ func TestBasicAuthGuardsAllButHealth(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticFilesRevalidate(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := newServer(dir, nil, Opts{})
+	r := httptest.NewRecorder()
+	srv.ServeHTTP(r, httptest.NewRequest("GET", "/app.js", nil))
+	if r.Code != 200 || r.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("got %d Cache-Control=%q", r.Code, r.Header().Get("Cache-Control"))
+	}
+}

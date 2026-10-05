@@ -135,9 +135,19 @@ func newServer(staticDir string, m fileManager, opts Opts) *Server {
 		mux.HandleFunc("GET /api/magnets/{id}/files/{index}", s.handleStream)
 	}
 	mux.HandleFunc("GET /api/opensubs/download", s.handleOpensubsDownload)
-	mux.Handle("/", http.FileServer(http.Dir(staticDir)))
+	mux.Handle("/", noCache(http.FileServer(http.Dir(staticDir))))
 	s.h = withBasicAuth(opts.Auth, mux)
 	return s
+}
+
+// noCache makes browsers revalidate the app's files on every load (a cheap
+// 304 via Last-Modified) instead of heuristically reusing stale modules for
+// hours or days after a deploy.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func withBasicAuth(cred string, next http.Handler) http.Handler {

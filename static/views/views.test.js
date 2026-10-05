@@ -167,3 +167,16 @@ test('downloadsRow lazy video resolves only on click, then downloads', async () 
     assert.equal(clicked, 1);
   } finally { restore(); }
 });
+
+test('statusBar shows the note while playing (data source, cache state)', () => {
+  const restore = installStub();
+  try {
+    const st = emitter({ phase: 'playing', note: 'Playing from local cache' });
+    const node = render(st);
+    assert.equal(node.textContent, 'Playing from local cache');
+    st.set({ phase: 'playing', note: null });
+    assert.equal(node.textContent, '');
+    st.set({ phase: 'idle', note: 'staged subs.srt — press Watch' });
+    assert.equal(node.textContent, 'staged subs.srt — press Watch');
+  } finally { restore(); }
+});

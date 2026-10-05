@@ -72,6 +72,13 @@ function insertChunk(index, chunk) {
   index.chunks.splice(i, 0, chunk);
 }
 
+// Bytes actually stored (chunks may overlap).
+function storedBytes(index) {
+  let n = 0;
+  for (const c of index.chunks) n += c.length;
+  return n;
+}
+
 function maxEnd(index) {
   let size = 0;
   for (const c of index.chunks) size = Math.max(size, c.offset + c.length);
@@ -103,7 +110,7 @@ function memoryFiles() {
     },
     async stat(id) {
       const index = files.get(id);
-      return index ? { size: maxEnd(index) } : null;
+      return index ? { size: maxEnd(index), bytes: storedBytes(index) } : null;
     },
     async remove(id) {
       files.delete(id);
@@ -204,7 +211,7 @@ function opfsFiles(root) {
     },
     async stat(id) {
       const ix = await index(id, false);
-      return ix ? { size: maxEnd(ix) } : null;
+      return ix ? { size: maxEnd(ix), bytes: storedBytes(ix) } : null;
     },
     async remove(id) {
       indexes.delete(id);

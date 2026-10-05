@@ -281,3 +281,39 @@ test('loadMagnet treats missing state as not-ready (only ready breaks poll)', as
   assert.deepEqual(r, { id: 'ns', fileIndex: 0 });
   assert.equal(gets, 3);
 });
+
+// --- cache accounting, pruning, clearing ---
+
+test('cachingFetchRange reports bytes by source (cache vs network)', async () => {
+  const file = new Uint8Array(100).map((_, i) => i);
+  const adapter = { fetchRange: async (_id, _i, s, e) => file.slice(s, e + 1) };
+  const seen = { cache: 0, network: 0 };
+  const fr = cachingFetchRange(opfsAdapter(null), adapter, 'src', 0, { onBytes: (k, n) => { seen[k] += n; } });
+  await fr(0, 19); // network
+  await fr(0, 19); // cache
+  await fr(10, 29); // 10 cached + 10 fetched
+  assert.deepEqual(seen, { cache: 30, network: 30 });
+});
+
+test('pruneCache drops expired files, then least recently used over budget', async () => {
+  const { pruneCache, cacheSize, clearCache } = await import('./cacheFile.js');
+  const o = opfsAdapter(null);
+  const adapter = { fetchRange: async (_id, _i, s, e) => new Uint8Array(e - s + 1) };
+  const day = 24 * 3600e3;
+  const realNow = Date.now;
+  try {
+    for (const [id, age] of [['old', 10 * day], ['mid', 2 * day], ['new', 0]]) {
+      Date.now = () => realNow() - age;
+      await cachingFetchRange(o, adapter, id, 0)(0, 99); // 100 bytes each, used at now - age
+    }
+  } finally {
+    Date.now = realNow;
+  }
+  assert.equal(await cacheSize(o), 300);
+  // TTL 7 days drops 'old'; budget 150 then drops the LRU of the rest ('mid')
+  const removed = await pruneCache(o, { maxBytes: 150 });
+  assert.deepEqual(removed, ['old:0', 'mid:0']);
+  assert.deepEqual(await o.listIds(), ['new:0']);
+  await clearCache(o);
+  assert.equal(await cacheSize(o), 0);
+});

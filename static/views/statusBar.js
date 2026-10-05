@@ -12,12 +12,12 @@ function isBusy(phase) {
 function textFor(s) {
   if (!s) return '';
   if (s.phase === 'error') return s.error || 'Error';
-  if (s.phase === 'idle') return '';
   if (s.phase === 'waiting') return 'Waiting for peers…';
   if (isBusy(s.phase)) return 'Fetching torrent…';
-  if (s.phase === 'ready') return 'Ready';
-  if (s.phase === 'playing') return '';
-  return '';
+  // Otherwise the informational note (data source, staged subtitles,
+  // cache state), if any.
+  if (s.phase === 'ready') return s.note || 'Ready';
+  return s.note || '';
 }
 
 function paint(node, s) {

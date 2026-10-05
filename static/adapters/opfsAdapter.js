@@ -9,7 +9,8 @@
 // OPFS mode (root = await navigator.storage.getDirectory()): one directory
 // per id, one file per chunk named by its offset, plus an `eof` file. No
 // file is ever rewritten (no truncating writable, no read-modify-write);
-// reads slice only the chunk files they need. The coverage index is
+// reads slice only the chunk files they need. missing() lists the gaps so
+// callers fetch only what isn't cached. The coverage index is
 // rebuilt from the directory listing after a reload.
 // Memory mode (root == null): same semantics, chunks kept in memory.
 
@@ -33,6 +34,24 @@ function covered(index, start, stop) {
     pos = to;
   }
   return pieces;
+}
+
+// Uncovered [from, to) ranges of inclusive [start, end], clipped to a known
+// eof; the last gap is open-ended (to = end + 1) while eof is unknown.
+function gapsOf(index, start, end) {
+  const stop = Math.min(end + 1, index?.eof ?? Infinity);
+  if (!index) return start < stop ? [[start, stop]] : [];
+  const gaps = [];
+  let pos = start;
+  for (const c of index.chunks) {
+    if (pos >= stop) break;
+    const cEnd = c.offset + c.length;
+    if (cEnd <= pos) continue;
+    if (c.offset > pos) gaps.push([pos, Math.min(c.offset, stop)]);
+    pos = Math.max(pos, cEnd);
+  }
+  if (pos < stop) gaps.push([pos, stop]);
+  return gaps;
 }
 
 async function readIndex(index, start, end) {
@@ -78,6 +97,9 @@ function memoryFiles() {
     async read(id, start, end) {
       const index = files.get(id);
       return index ? readIndex(index, start, end) : null;
+    },
+    async missing(id, start, end) {
+      return gapsOf(files.get(id), start, end);
     },
     async stat(id) {
       const index = files.get(id);
@@ -176,6 +198,9 @@ function opfsFiles(root) {
     async read(id, start, end) {
       const ix = await index(id, false);
       return ix ? readIndex(ix, start, end) : null;
+    },
+    async missing(id, start, end) {
+      return gapsOf(await index(id, false), start, end);
     },
     async stat(id) {
       const ix = await index(id, false);

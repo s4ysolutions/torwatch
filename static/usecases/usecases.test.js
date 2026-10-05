@@ -72,6 +72,20 @@ test('cachingFetchRange: never serves an uncovered gap, records eof', async () =
   assert.deepEqual(fetched, [[80, 89], [0, 9], [90, 199]]);
 });
 
+test('cachingFetchRange fetches only the uncached gaps', async () => {
+  const file = new Uint8Array(100).map((_, i) => i);
+  const fetched = [];
+  const adapter = { fetchRange: async (_id, _i, s, e) => { fetched.push([s, e]); return file.slice(s, e + 1); } };
+  const fr = cachingFetchRange(opfsAdapter(null), adapter, 'm', 0);
+  await fr(10, 19);
+  await fr(30, 39);
+  assert.deepEqual([...await fr(0, 49)], [...file.slice(0, 50)]);
+  assert.deepEqual(fetched, [[10, 19], [30, 39], [0, 9], [20, 29], [40, 49]]);
+  fetched.length = 0;
+  await fr(0, 49);
+  assert.deepEqual(fetched, []); // now fully cached
+});
+
 // --- loadMagnet extras ---
 
 test('loadMagnet polls until ready and sets playerState', async () => {

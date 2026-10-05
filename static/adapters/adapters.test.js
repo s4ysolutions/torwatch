@@ -123,6 +123,17 @@ test('opfs read past covered end is a miss until eof is known', async () => {
   assert.equal((await o.read('m1', 5, 9)).length, 0); // past eof: empty = EOF
 });
 
+test('opfs missing lists gaps, clipped at eof', async () => {
+  const o = opfsAdapter(null);
+  assert.deepEqual(await o.missing('m1', 0, 9), [[0, 10]]);
+  await o.write('m1', 2, new Uint8Array(3)); // [2,5)
+  await o.write('m1', 7, new Uint8Array(1)); // [7,8)
+  assert.deepEqual(await o.missing('m1', 0, 9), [[0, 2], [5, 7], [8, 10]]);
+  await o.setEof('m1', 8);
+  assert.deepEqual(await o.missing('m1', 0, 9), [[0, 2], [5, 7]]);
+  assert.deepEqual(await o.missing('m1', 2, 4), []);
+});
+
 test('opfs read stitches adjacent and overlapping chunks', async () => {
   const o = opfsAdapter(null);
   await o.write('m1', 0, new Uint8Array([1, 2, 3, 4]));

@@ -60,6 +60,7 @@ background:var(--wash);border:1px solid var(--line);border-radius:10px;padding:.
 color:var(--muted);margin:.4rem 0 .2rem}
 .tracks-head:first-child{margin-top:0}
 .tracks-empty{font-size:.88rem;color:var(--muted)}
+.tracks-audio.tracks-off{color:var(--muted);cursor:not-allowed}
 .tracks-audio,.tracks-sub{display:flex;gap:.45rem;align-items:baseline;font-size:.93rem;
 font-weight:400;margin:.15rem 0;cursor:pointer}
 

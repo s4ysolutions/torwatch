@@ -239,3 +239,47 @@ test('MP3 track: codecString and 44100 mdhd timescale', () => {
   // mdhd v0: size(4) type(4) v/f(4) ctime(4) mtime(4) timescale(4)
   assert.equal(new DataView(mdhd.buffer, mdhd.byteOffset, mdhd.length).getUint32(20), 44100);
 });
+
+// --- AC-3 / E-AC-3 passthrough ---
+
+const ac3Info = { codec: 'ac-3', sampleRate: 48000, channels: 6, samplesPerFrame: 1536, fscod: 0, bsid: 8, bsmod: 0, acmod: 7, lfeon: 1, bitRateCode: 15, dataRate: 448 };
+const eac3Info = { codec: 'ec-3', sampleRate: 48000, channels: 2, samplesPerFrame: 1536, fscod: 0, bsid: 16, bsmod: 0, acmod: 2, lfeon: 0, dataRate: 224 };
+
+test('AC-3 track: ac-3 sample entry with dac3, sample-rate timescale', () => {
+  const track = { type: 'audio', codecId: 'A_AC3', codecPrivate: new Uint8Array(0), language: 'rus', ac3: ac3Info };
+  assert.equal(codecString(track), 'ac-3');
+  const init = initSegment(track);
+  assert.ok(containsBox(init, 'ac-3'));
+  const dac3 = findBox(init, 'dac3');
+  assert.ok(dac3);
+  assert.equal(dac3.length, 11);
+  const mdhd = findBox(init, 'mdhd');
+  assert.equal(new DataView(mdhd.buffer, mdhd.byteOffset, mdhd.length).getUint32(20), 48000);
+});
+
+test('E-AC-3 track: ec-3 sample entry with dec3', () => {
+  const track = { type: 'audio', codecId: 'A_EAC3', codecPrivate: new Uint8Array(0), language: 'eng', ac3: eac3Info };
+  assert.equal(codecString(track), 'ec-3');
+  const init = initSegment(track);
+  assert.ok(containsBox(init, 'ec-3'));
+  const dec3 = findBox(init, 'dec3');
+  assert.ok(dec3);
+  assert.equal(dec3.length, 13);
+});
+
+test('AC-3 fragment uses 1536-sample durations', () => {
+  const track = { type: 'audio', codecId: 'A_AC3', codecPrivate: new Uint8Array(0), language: 'und', ac3: ac3Info };
+  // MKV 1ms timestamps: 32ms steps, not exactly 1536/48000
+  const samples = [0, 0.032, 0.064].map((timestamp) => ({ timestamp, keyframe: true, data: new Uint8Array(4) }));
+  const frag = fragment(track, samples, 0);
+  const trun = findBox(frag, 'trun');
+  const dv = new DataView(trun.buffer, trun.byteOffset, trun.length);
+  // trun: size type v/f count data_offset, then per sample: duration size flags cts
+  assert.equal(dv.getUint32(12), 3);
+  for (let i = 0; i < 3; i++) assert.equal(dv.getUint32(20 + i * 16), 1536);
+});
+
+test('AC-3 track without first-frame config fails loudly', () => {
+  const track = { type: 'audio', codecId: 'A_AC3', codecPrivate: new Uint8Array(0), language: 'und' };
+  assert.throws(() => initSegment(track), /first-frame config/);
+});

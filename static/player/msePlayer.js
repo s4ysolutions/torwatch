@@ -18,7 +18,10 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   const ms = new MediaSource();
   videoEl.src = URL.createObjectURL(ms);
   let vbuf = null, abuf = null;
-  let activeAudio = trackList.find(t => t.type === 'audio');
+  // Tracks the demuxer marked unplayable (codec the browser can't decode)
+  // are never selected.
+  const playableAudio = t => t.type === 'audio' && t.playable !== false;
+  let activeAudio = trackList.find(playableAudio);
   const videoTrack = trackList.find(t => t.type === 'video');
   let generation = 0; // bumped by seek/setAudioTrack to cancel stale pumps
   const queue = [];   // pending appends: {buf, data}
@@ -157,7 +160,7 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       pump(generation, sec);
     },
     setAudioTrack(trackNumber) {
-      const t = trackList.find(x => x.type === 'audio' && x.number === trackNumber);
+      const t = trackList.find(x => playableAudio(x) && x.number === trackNumber);
       if (!t || t === activeAudio) return;
       activeAudio = t;
       // F-B: invalidate stale pumps, abort updating buffers, clear the

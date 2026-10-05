@@ -31,6 +31,7 @@ import { cachingFetchRange } from './usecases/cacheFile.js';
 import { addExternalSubs } from './usecases/loadSubtitles.js';
 import { switchAudio } from './usecases/switchAudio.js';
 import { MkvDemuxer, UnsupportedError } from './demux/mkvDemuxer.js';
+import { audioSupport } from './demux/codecs.js';
 import { createMsePlayer } from './player/msePlayer.js';
 import { createNativePlayer } from './player/nativePlayer.js';
 import { inputCardView } from './views/inputCardView.js';
@@ -59,6 +60,9 @@ let pendingSubs = null;
 const engineStore = store.ns('torwatch');
 const getEngine = () => engineStore.get('engine', 'browser');
 const normId = (s) => String(s).toLowerCase();
+
+// AC-3/E-AC-3 pass through to MSE only where the browser decodes them.
+const canPlayAudio = audioSupport((mime) => globalThis.MediaSource?.isTypeSupported?.(mime) ?? false);
 
 // Capability check runs *before* selecting the engine (client creation is
 // lazy, so try/catch around the factory cannot catch it).
@@ -404,16 +408,23 @@ function mountPlay({ id: rawId, file }) {
       if (/\.mkv$/i.test(name)) {
         // Demux + MSE path (multi-audio/subs need track switching).
         const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex);
-        demuxer = new MkvDemuxer(fetchRange);
+        demuxer = new MkvDemuxer(fetchRange, { canPlayAudio });
         const { tracks: htracks } = await demuxer.readHeader();
         if (cancelled) return;
         const audio = htracks.filter((t) => t.type === 'audio');
+        const firstPlayable = audio.find((t) => t.playable !== false);
         const subs = htracks.filter((t) => t.type === 'subtitle');
         for (const t of subs) embeddedByLabel.set(t.name || t.language || `Track ${t.number}`, t.number);
         tracks.set({
-          audio: audio.map((t) => ({ number: t.number, language: t.language, name: t.name })),
+          audio: audio.map((t) => ({
+            number: t.number,
+            language: t.language,
+            name: t.name,
+            codecId: t.codecId,
+            playable: t.playable !== false,
+          })),
           subtitles: subs.map((t) => ({ label: t.name || t.language || `Track ${t.number}` })),
-          activeAudio: audio.length ? audio[0].number : null,
+          activeAudio: firstPlayable ? firstPlayable.number : null,
           activeSubtitle: null,
         });
         if (pendingSubs) {

@@ -12,4 +12,12 @@ ffmpeg -y -f lavfi -i testsrc=duration=2:size=320x240:rate=10 \
   -c:v libx264 -pix_fmt yuv420p -c:a aac -c:s srt twoaudio.mkv
 ffmpeg -y -f lavfi -i testsrc=duration=2:size=320x240:rate=10 -f lavfi -i sine=frequency=440:duration=2 \
   -c:v mpeg2video -c:a ac3 unsupported.mkv
+# AC-3 5.1 + E-AC-3 stereo + AAC: passthrough / per-track playability.
+ffmpeg -y -f lavfi -i testsrc=duration=2:size=320x240:rate=10 \
+  -f lavfi -i sine=frequency=440:duration=2 -f lavfi -i sine=frequency=660:duration=2 \
+  -f lavfi -i sine=frequency=880:duration=2 \
+  -map 0:v -map 1:a -map 2:a -map 3:a \
+  -c:v libx264 -pix_fmt yuv420p \
+  -c:a:0 ac3 -ac:a:0 6 -b:a:0 192k -c:a:1 eac3 -ac:a:1 2 -c:a:2 aac \
+  -metadata:s:a:0 language=rus -metadata:s:a:1 language=ukr -metadata:s:a:2 language=eng ac3mix.mkv
 rm subs.srt

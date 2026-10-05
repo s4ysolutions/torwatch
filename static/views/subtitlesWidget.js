@@ -9,7 +9,7 @@
 // props: { emitter|tracks, video|videoEl, onSeek, title?, searchSubs?,
 //   fetchText?, loadExternal?, onCopy? }
 //   searchSubs(title) => Promise<{results:[{fileName,language,downloadUrl}]}>
-//     (Task 16 wires backendAdapter().searchSubs). fetchText defaults to
+//     (app.js wires the adapter's searchSubs). fetchText defaults to
 //     global fetch. loadExternal defaults to addExternalSubs (same track
 //     list). onCopy(text) overrides clipboard write (test hook).
 //

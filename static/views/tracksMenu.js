@@ -11,11 +11,7 @@
 //   playable === false → radio disabled, label notes the codec.
 //   onSwitch(trackNumber) — audio radio change. onSubtitle(label, checked) —
 //   subtitle checkbox change (optional).
-//
-// NOTE (F-B contract, see videoStageView.js): the onSwitch handler in Task 16
-// MUST abort updating SourceBuffers + clear the pending append queue +
-// invalidate the pump generation BEFORE calling player.setAudioTrack(n).
-// Never append queued fragments to a removed audio buffer.
+//   The player's setAudioTrack handles the SourceBuffer swap safely.
 
 import { el } from '../util/dom.js';
 

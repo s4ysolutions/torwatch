@@ -8,7 +8,7 @@ test('player modules import in node without exploding', async () => {
   assert.equal(typeof mse.createMsePlayer, 'function');
 });
 
-// I5: seek() before sourceopen must not throw (buffers not attached yet) —
+// seek() before sourceopen must not throw (buffers not attached yet) —
 // it just moves currentTime and the sourceopen pump covers the seek.
 test('mse seek-before-sourceopen does not deref null buffers', async () => {
   const listeners = {};
@@ -55,7 +55,7 @@ test('mse seek-before-sourceopen does not deref null buffers', async () => {
       { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'und' },
     ];
     const player = createMsePlayer(videoEl, demuxer, tracks);
-    assert.doesNotThrow(() => player.seek(5)); // I5: no {buf:null} queue push
+    assert.doesNotThrow(() => player.seek(5)); // no {buf:null} queue push
     assert.equal(videoEl.currentTime, 5);
     // sourceopen still attaches + pumps from the sought position
     globalThis.__lastMS.fire('sourceopen');
@@ -169,4 +169,36 @@ test('mse fragments carry tfdt in each track timescale (90k video, sample-rate a
     delete globalThis.MediaSource;
     delete globalThis.__lastMS;
   }
+});
+
+// --- MSE helpers ---
+
+test('drainGroups flushes leftover partial groups and empties them', async () => {
+  const { drainGroups } = await import('./mseHelpers.js');
+  const groups = new Map([
+    ['0:12', [{ timestamp: 12.1 }, { timestamp: 12.4 }]],
+    ['1:12', []],
+    ['0:13', [{ timestamp: 13.0 }]],
+  ]);
+  const emitted = [];
+  const n = drainGroups(groups, (key, batch) => emitted.push([key, batch.length]));
+  assert.equal(n, 2);
+  assert.deepEqual(emitted, [['0:12', 2], ['0:13', 1]]);
+  for (const [, samples] of groups) assert.equal(samples.length, 0);
+  assert.equal(drainGroups(groups, () => { throw new Error('must not emit'); }), 0);
+  assert.equal(drainGroups(null, () => {}), 0);
+});
+
+test('finalizePlayback ends stream only when open, never throws', async () => {
+  const { finalizePlayback } = await import('./mseHelpers.js');
+  let calls = 0;
+  assert.ok(finalizePlayback({ readyState: 'open', endOfStream: () => { calls++; } }));
+  assert.equal(calls, 1);
+  assert.equal(finalizePlayback({ readyState: 'closed', endOfStream: () => { calls++; } }), false);
+  assert.equal(calls, 1);
+  assert.equal(finalizePlayback(null), false);
+  assert.equal(finalizePlayback({
+    readyState: 'open',
+    endOfStream: () => { throw new Error('InvalidStateError'); },
+  }), false);
 });

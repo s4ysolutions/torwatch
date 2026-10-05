@@ -7,5 +7,5 @@ export const playerState = emitter({
   position: 0,
   duration: 0,
   error: null,
-  note: null, // C5: cacheFile sets `note` on quota-degrade; keep key present
+  note: null, // cacheFile sets `note` on quota-degrade; keep key present
 });

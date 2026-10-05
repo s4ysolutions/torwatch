@@ -86,3 +86,12 @@ font-weight:400;margin:.15rem 0;cursor:pointer}
 .picker-last>a{font-weight:700}
 .picker-progress{height:4px;max-width:24rem;margin:.2rem 0 .35rem;background:var(--line);border-radius:2px;overflow:hidden}
 .picker-progress-fill{height:100%;background:var(--red)}
+.picker a,.episode-nav a{text-decoration:none;font-weight:650}
+.picker-file{color:var(--ink)}
+.picker-file:hover,.picker-file:focus-visible{color:var(--red);text-decoration:underline}
+.picker-file:visited{color:var(--ink)}
+.picker-continue a{color:var(--red)}
+.picker-continue a:hover,.picker-continue a:focus-visible{color:var(--red-d);text-decoration:underline}
+.picker-last .picker-file{color:var(--red)}
+.episode-nav a{color:var(--muted)}
+.episode-nav a:hover,.episode-nav a:focus-visible{color:var(--red)}

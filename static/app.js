@@ -28,6 +28,8 @@ import {
   bindPosition,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
+import { playableFiles, nextFile, baseName } from './domain/files.js';
+import { filePickerView } from './views/filePickerView.js';
 import { cachingFetchRange, pruneCache, cacheSize, describeSource } from './usecases/cacheFile.js';
 import { formatBytes } from './util/format.js';
 import { clearEverywhere, describeClear } from './usecases/clearEverywhere.js';
@@ -163,12 +165,17 @@ function beginSubmit(req) {
 }
 const isAbort = (e) => e?.name === 'AbortError';
 
+// Several videos (season pack): let the user choose; one: play it.
+function routeAfterLoad(id, info, fileIndex) {
+  return playableFiles(info?.files).length > 1 ? `#/files/${id}` : `#/play/${id}/${fileIndex}`;
+}
+
 async function submitMagnet(magnet) {
   const signal = beginSubmit({ magnet });
   playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
   try {
-    const { id, fileIndex } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS, signal });
-    go(`#/play/${normId(id)}/${fileIndex}`);
+    const { id, fileIndex, info } = await loadMagnet({ adapter, magnet, pollMs: 1000, watchdogMs: WATCHDOG_MS, signal });
+    go(routeAfterLoad(normId(id), info, fileIndex));
   } catch (e) {
     if (!isAbort(e)) failWithFiles(e);
   }
@@ -186,7 +193,7 @@ async function submitTorrent(file) {
     const info = await pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS, signal });
     const fileIndex = pickVideoFile(info.files ?? [], { id, ...(info ?? {}) });
     playerState.set({ ...playerState.get(), phase: 'ready', magnetId: id, fileIndex, error: null });
-    go(`#/play/${id}/${fileIndex}`);
+    go(routeAfterLoad(id, info, fileIndex));
   } catch (e) {
     if (!isAbort(e)) failWithFiles(e);
   }
@@ -514,6 +521,15 @@ function mountPlay({ id: rawId, file }) {
       const f = (info.files ?? []).find((x) => x.index === fileIndex);
       const name = f?.path ?? `file-${fileIndex}`;
       fileName = String(name).split('/').pop() || fileName;
+      // Season packs: back to the list, and on to the next episode.
+      if (playableFiles(info.files).length > 1) {
+        const next = nextFile(info.files, fileIndex);
+        const nav = el('div', { class: 'episode-nav' }, [
+          el('a', { href: `#/files/${id}` }, '☰ Episodes'),
+          next ? el('a', { href: `#/play/${id}/${next.index}`, title: next.path }, `Next: ${baseName(next.path)} ▶`) : null,
+        ]);
+        stageHost.insertBefore(nav, stageHost.firstChild?.nextSibling ?? null);
+      }
       if (/\.mkv$/i.test(name)) {
         // Demux + MSE path (multi-audio/subs need track switching).
         const fetchRange = cachingFetchRange(opfs, adapter, id, fileIndex, { onBytes: countSource });
@@ -578,11 +594,46 @@ function mountPlay({ id: rawId, file }) {
   };
 }
 
+// File picker for a multi-video torrent (#/files/:id). A deep link polls
+// like the player until the torrent's metadata is there.
+function mountFiles({ id: rawId }) {
+  const id = normId(rawId);
+  const host = $('stage');
+  clear(host);
+  let cancelled = false;
+  let dispose = () => {};
+  playerState.set({ ...playerState.get(), phase: 'fetching', error: null, note: null });
+  pollMagnetReady({ adapter, id, pollMs: 1000, watchdogMs: WATCHDOG_MS })
+    .then((info) => {
+      if (cancelled) return;
+      const all = info.files ?? [];
+      const playable = playableFiles(all);
+      if (!playable.length) throw new NoPlayableError({ id, ...info });
+      dispose = filePickerView(host, {
+        name: info.name,
+        files: all,
+        positionOf: (index) => loadPosition(id, index),
+        hrefFor: (index) => `#/play/${id}/${index}`,
+        otherCount: all.length - playable.length,
+      });
+      playerState.set({ ...playerState.get(), phase: 'idle', note: null });
+    })
+    .catch((e) => {
+      if (!cancelled) failWithFiles(e);
+    });
+  return () => {
+    cancelled = true;
+    attempt('file picker dispose', dispose);
+    clear(host);
+  };
+}
+
 // Single mount function; teardown previous on route change.
 function mount(r) {
   if (r && r.name === 'play' && r.params && r.params.id != null && r.params.file != null) {
     return mountPlay(r.params);
   }
+  if (r && r.name === 'files' && r.params?.id != null) return mountFiles(r.params);
   return mountHome();
 }
 

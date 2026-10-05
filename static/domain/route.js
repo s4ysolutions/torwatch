@@ -4,6 +4,8 @@ export function parseRoute(hash) {
   const path = String(hash ?? '').replace(/^#/, '') || '/';
   const m = /^\/play\/([^/]+)\/([^/]+)\/?$/.exec(path);
   if (m) return { name: 'play', params: { id: m[1], file: m[2] } };
+  const f = /^\/files\/([^/]+)\/?$/.exec(path);
+  if (f) return { name: 'files', params: { id: f[1] } };
   return { name: 'home', params: {} };
 }
 

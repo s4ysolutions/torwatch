@@ -1,7 +1,7 @@
 import { playerState } from '../domain/playerState.js';
 import { store } from '../util/store.js';
 
-const VIDEO_RE = /\.(mp4|mkv|webm)$/i;
+import { VIDEO_RE } from '../domain/files.js';
 const POLL_MS = 1000;
 // Unbounded poll watchdog — after this long without 'ready', signal
 // "waiting for peers" (phase 'waiting') but keep polling.
@@ -101,5 +101,5 @@ export async function loadMagnet({ adapter, magnet, pollMs = POLL_MS, watchdogMs
   s.set('history', [magnet, ...prev.filter((m) => m !== magnet)].slice(0, HISTORY_CAP));
   const position = loadPosition(id, fileIndex);
   playerState.set({ ...playerState.get(), phase: 'ready', magnetId: id, fileIndex, position, error: null });
-  return { id, fileIndex };
+  return { id, fileIndex, info };
 }

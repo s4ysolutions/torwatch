@@ -36,7 +36,7 @@ test('loadMagnet picks largest video file and remembers magnet', async () => {
       { index: 0, path: 'a.txt', size: 5 },
       { index: 1, path: 'movie.mkv', size: 900 }] })));
   const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?xt=urn:btih:xx' });
-  assert.deepEqual(r, { id: 'x', fileIndex: 1 });
+  assert.deepEqual({ id: r.id, fileIndex: r.fileIndex }, { id: 'x', fileIndex: 1 });
   assert.equal(store.ns('torwatch').get('history')[0], 'magnet:?xt=urn:btih:xx');
 });
 
@@ -99,7 +99,7 @@ test('loadMagnet polls until ready and sets playerState', async () => {
       : { id: 'y', state: 'ready', files: [{ index: 0, path: 'film.mp4', size: 10 }] });
   });
   const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?poll', pollMs: 5 });
-  assert.deepEqual(r, { id: 'y', fileIndex: 0 });
+  assert.deepEqual({ id: r.id, fileIndex: r.fileIndex }, { id: 'y', fileIndex: 0 });
   assert.equal(gets, 2);
   assert.equal(playerState.get().magnetId, 'y');
   assert.equal(playerState.get().fileIndex, 0);
@@ -260,7 +260,7 @@ test('loadMagnet signals waiting after watchdogMs but keeps polling to ready', a
       return Response.json({ id: 'w', state: 'ready', files: [{ index: 0, path: 'film.mp4', size: 10 }] });
     });
     const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?stall', pollMs: 5, watchdogMs: 20 });
-    assert.deepEqual(r, { id: 'w', fileIndex: 0 });
+    assert.deepEqual({ id: r.id, fileIndex: r.fileIndex }, { id: 'w', fileIndex: 0 });
     assert.ok(phases.includes('waiting'), `expected a waiting phase, got ${JSON.stringify(phases)}`);
     assert.equal(playerState.get().phase, 'ready');
   } finally {
@@ -278,7 +278,7 @@ test('loadMagnet treats missing state as not-ready (only ready breaks poll)', as
     return Response.json({ id: 'ns', state: 'ready', files: [{ index: 0, path: 'film.mp4', size: 10 }] });
   });
   const r = await loadMagnet({ adapter: fake, magnet: 'magnet:?nostate', pollMs: 1 });
-  assert.deepEqual(r, { id: 'ns', fileIndex: 0 });
+  assert.deepEqual({ id: r.id, fileIndex: r.fileIndex }, { id: 'ns', fileIndex: 0 });
   assert.equal(gets, 3);
 });
 

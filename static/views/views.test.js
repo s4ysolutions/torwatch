@@ -180,3 +180,30 @@ test('statusBar shows the note while playing (data source, cache state)', () => 
     assert.equal(node.textContent, 'staged subs.srt — press Watch');
   } finally { restore(); }
 });
+
+test('filePickerView lists videos by season with sizes and resume markers', async () => {
+  const { filePickerView } = await import('./filePickerView.js');
+  const restore = installStub();
+  try {
+    const container = makeStubEl('div');
+    const files = [
+      { index: 0, path: 'Show/Season 1/S01E10.mp4', size: 1 << 20 },
+      { index: 1, path: 'Show/Season 1/S01E02.mp4', size: 2 << 20 },
+      { index: 2, path: 'Show/readme.txt', size: 10 },
+      { index: 3, path: 'Show/Season 2/S02E01.mp4', size: 3 << 20 },
+    ];
+    const dispose = filePickerView(container, {
+      name: 'Show', files, otherCount: 1,
+      positionOf: (i) => (i === 1 ? 754 : 0),
+      hrefFor: (i) => `#/play/x/${i}`,
+    });
+    const text = (n) => (n.textContent || '') + (n.children ?? []).map(text).join('');
+    const links = walk(container).filter((n) => n.tagName === 'A' && n.className === 'picker-file');
+    assert.deepEqual(links.map((a) => [text(a), a.attrs.href]), [['S01E02.mp4', '#/play/x/1'], ['S01E10.mp4', '#/play/x/0'], ['S02E01.mp4', '#/play/x/3']]);
+    const all = text(container);
+    assert.match(all, /3 videos · 1 other files/);
+    assert.match(all, /Season 1.*Season 2/);
+    assert.match(all, /resume at 12:34/);
+    dispose();
+  } finally { restore(); }
+});

@@ -193,7 +193,7 @@ function invalidState(msg) {
   return Object.assign(new Error(`The object is in an invalid state. (${msg})`), { name: 'InvalidStateError' });
 }
 
-function installStrictMse() {
+function installStrictMse({ changeType = false } = {}) {
   const all = [];
   class StrictSourceBuffer {
     constructor(ms, mime) {
@@ -207,8 +207,8 @@ function installStrictMse() {
       this.updating = true; this.op = op;
       setTimeout(() => { this.updating = false; this.op = null; for (const fn of this.l.updateend ?? []) fn(); }, 1);
     }
-    appendBuffer(d) { this._start('append'); this.appended.push(d); }
-    remove() { this._start('remove'); }
+    appendBuffer(d) { this._start('append'); this.appended.push(d); (this.ops ??= []).push(['append', d]); }
+    remove(from) { this._start('remove'); (this.ops ??= []).push(['remove', from]); }
     abort() {
       if (this.op === 'remove') throw invalidState('abort during remove');
       if (this.ms.readyState !== 'open') throw invalidState('abort when not open');
@@ -227,7 +227,16 @@ function installStrictMse() {
     }
     addSourceBuffer(mime) {
       if (this.readyState !== 'open') throw invalidState('addSourceBuffer when not open');
-      const b = new StrictSourceBuffer(this, mime); this.sourceBuffers.push(b); return b;
+      const b = new StrictSourceBuffer(this, mime);
+      if (changeType) {
+        b.changeType = (m) => {
+          if (b.updating) throw invalidState('changeType while updating');
+          b.mime = m;
+          (b.ops ??= []).push(['changeType', m]);
+        };
+      }
+      this.sourceBuffers.push(b);
+      return b;
     }
     removeSourceBuffer(b) { this.sourceBuffers = this.sourceBuffers.filter((x) => x !== b); }
     endOfStream() {
@@ -363,6 +372,105 @@ test('strict MSE: a real MKV streams to the end (regression: crash after the fir
     assert.equal(env.all[0].readyState, 'ended', 'reached endOfStream');
     const [v, a] = env.all[0].sourceBuffers;
     assert.ok(v.appended.length > 5 && a.appended.length > 5);
+    player.dispose();
+  } finally {
+    env.restore();
+  }
+});
+
+// mdat payload bytes of an fMP4 fragment (after the 8-byte mdat header).
+function mdatBytes(frag) {
+  for (let i = 0; i + 8 <= frag.length; i++) {
+    if (frag[i + 4] === 0x6d && frag[i + 5] === 0x64 && frag[i + 6] === 0x61 && frag[i + 7] === 0x74) return frag.slice(i + 8);
+  }
+  return null;
+}
+
+// 20s, 4 samples per second per track; data bytes = track number. Slow, so
+// a switch lands mid-pump.
+const slowTwenty = {
+  durationSec: () => 20,
+  async *samples(from, _to, sel) {
+    for (let q = Math.floor(from * 4); q < 80; q++) {
+      await settle(1);
+      for (const n of sel) yield { trackNumber: n, timestamp: q / 4, keyframe: true, data: new Uint8Array(8).fill(n) };
+    }
+  },
+};
+
+test('audio switch via changeType: video untouched, new track from the playhead on', async () => {
+  const env = installStrictMse({ changeType: true });
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    const errors = [];
+    const player = createMsePlayer(video, slowTwenty, [AVC, AAC_A, AAC_B], { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    await settle(60); // pump part-way through the file
+    const [v, a] = env.all[0].sourceBuffers;
+    const videoOpsBefore = v.ops.length;
+    video.currentTime = 2;
+    a.ops.length = 0;
+    player.setAudioTrack(3);
+    for (let i = 0; i < 300 && env.all[0].readyState !== 'ended'; i++) await settle(5);
+    assert.deepEqual(errors, []);
+    assert.equal(env.all.length, 1, 'no MediaSource rebuild');
+    assert.ok(!v.ops.slice(videoOpsBefore).some(([k]) => k === 'remove'), 'video not cleared');
+    // changeType, then remove from the playhead, then the new init segment
+    assert.deepEqual(a.ops.slice(0, 2), [['changeType', 'audio/mp4; codecs="mp4a.40.2"'], ['remove', 2]]);
+    const frags = a.ops.slice(3).filter(([k]) => k === 'append').map(([, d]) => mdatBytes(d)).filter(Boolean);
+    assert.ok(frags.length > 2, 'backfill + continued pump');
+    assert.ok(frags.every((b) => b.every((x) => x === 3)), 'only the new track after the switch');
+    assert.equal(env.all[0].readyState, 'ended', 'stream still ends');
+    player.dispose();
+  } finally {
+    env.restore();
+  }
+});
+
+test('audio switch via changeType after end of stream re-ends cleanly', async () => {
+  const env = installStrictMse({ changeType: true });
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    const errors = [];
+    const player = createMsePlayer(video, tenSeconds, [AVC, AAC_A, AAC_B], { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    await settle();
+    assert.equal(env.all[0].readyState, 'ended');
+    video.currentTime = 6;
+    player.setAudioTrack(3);
+    await settle();
+    assert.deepEqual(errors, []);
+    assert.equal(env.all.length, 1);
+    assert.equal(env.all[0].readyState, 'ended');
+    player.dispose();
+  } finally {
+    env.restore();
+  }
+});
+
+test('fallback rebuild restores the position only once metadata is loaded', async () => {
+  const env = installStrictMse(); // no changeType
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    video.readyState = 0;
+    const player = createMsePlayer(video, tenSeconds, [AVC, AAC_A, AAC_B]);
+    env.all[0].fire('sourceopen');
+    await settle();
+    video.currentTime = 6;
+    video.paused = false;
+    player.setAudioTrack(3);
+    video.currentTime = 0; // the new src resets the element
+    video.paused = true;
+    env.all[1].fire('sourceopen');
+    await settle();
+    assert.equal(video.currentTime, 0, 'not set before metadata');
+    video.readyState = 1;
+    video.fire('loadedmetadata');
+    assert.equal(video.currentTime, 6);
+    assert.equal(video.paused, false, 'resumed');
     player.dispose();
   } finally {
     env.restore();

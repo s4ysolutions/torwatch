@@ -35,6 +35,11 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   let halted = false;
   let disposed = false;
   let startAt = 0; // where the pump starts once the MediaSource opens
+  // Audio switch bookkeeping (see setAudioTrack).
+  let pumpAt = 0; // latest sample time the pump has read
+  let pumpDone = false; // pump reached the end of the file
+  let audioCutoff = null; // pump appends the new audio track from here on
+  let backfilling = false;
   // Backpressure: pause the pump while too many ops are pending or >30s is
   // buffered ahead; resume on updateend (plus a timeout fallback).
   const MAX_QUEUE = 32;
@@ -82,10 +87,12 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       if (op.buf.updating) break; // resumes on that buffer's updateend
       queue.shift();
       try {
-        if (op.kind === 'remove') op.buf.remove(0, Infinity);
+        if (op.kind === 'remove') op.buf.remove(op.from ?? 0, Infinity);
+        else if (op.kind === 'changeType') op.buf.changeType(op.mime); // synchronous
         else op.buf.appendBuffer(op.data);
       } catch (e) {
-        halt(describe(op.kind === 'remove' ? 'SourceBuffer.remove' : 'SourceBuffer.appendBuffer', e));
+        const call = { remove: 'SourceBuffer.remove', changeType: 'SourceBuffer.changeType' }[op.kind] ?? 'SourceBuffer.appendBuffer';
+        halt(describe(call, e));
         return;
       }
     }
@@ -117,15 +124,26 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       queue.push({ buf: vbuf, kind: 'append', data });
       runQueue();
     });
-    const afrag = createFragmenter(activeAudio, (data) => {
+    // The audio track can change mid-pump (setAudioTrack): a new
+    // fragmenter then takes over from audioCutoff on; the backfill covers
+    // the time before it.
+    const audioFrag = () => createFragmenter(activeAudio, (data) => {
       queue.push({ buf: abuf, kind: 'append', data });
       runQueue();
     });
-    const sel = [videoTrack.number, activeAudio.number, ...subtitleNums];
+    let afrag = audioFrag();
+    let afragTrack = activeAudio;
+    audioCutoff = null;
+    pumpAt = fromSec;
+    pumpDone = false;
+    // Every playable audio track is read, so a switch needs no new walk.
+    const audioNums = new Set(trackList.filter(playableAudio).map(t => t.number));
+    const sel = [videoTrack.number, ...audioNums, ...subtitleNums];
     const isSub = new Set(subtitleNums);
     try {
       for await (const s of demuxer.samples(fromSec, demuxer.durationSec(), sel)) {
         if (gen !== generation) return; // stale
+        pumpAt = Math.max(pumpAt, s.timestamp);
         // Pause fetching while the queue is full or plenty is buffered
         // ahead; updateend (via runQueue) wakes us early.
         while (gen === generation && (queue.length >= MAX_QUEUE || bufferedAhead() > MAX_AHEAD_SEC)) {
@@ -138,8 +156,12 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
           } catch {}
         } else if (s.trackNumber === videoTrack.number) {
           vfrag.push(s);
-        } else {
-          afrag.push(s);
+        } else if (s.trackNumber === activeAudio.number) {
+          if (afragTrack !== activeAudio) {
+            afrag = audioFrag(); // previous track's pending frames are dropped
+            afragTrack = activeAudio;
+          }
+          if (audioCutoff == null || s.timestamp >= audioCutoff) afrag.push(s);
         }
       }
     } catch (e) {
@@ -147,17 +169,50 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       // (gen now stale) skips flush/endOfStream, and surface one error.
       if (gen === generation) halt(e);
     } finally {
-      // Flush what is pending, then endOfStream once idle.
+      // Flush what is pending, then endOfStream once idle (and once a
+      // running audio backfill is done).
       if (gen === generation) {
+        pumpDone = true;
         try {
           vfrag.flush();
           afrag.flush();
-          eosPending = true;
+          if (!backfilling) eosPending = true;
           runQueue();
         } catch (e) {
           halt(e);
         }
       }
+    }
+  }
+
+  // New audio track for [fromSec, untilSec): the part the pump already read
+  // ahead with the previous track. Audio-only, mostly from the cache.
+  async function backfill(gen, track, fromSec, untilSec) {
+    backfilling = true;
+    const frag = createFragmenter(track, (data) => {
+      queue.push({ buf: abuf, kind: 'append', data });
+      runQueue();
+    });
+    const live = () => gen === generation && track === activeAudio;
+    try {
+      for await (const s of demuxer.samples(fromSec, Infinity, [track.number])) {
+        if (!live()) return;
+        if (s.timestamp >= untilSec) break;
+        while (live() && queue.length >= MAX_QUEUE) await waitForDrain();
+        if (!live()) return;
+        frag.push(s);
+      }
+      if (!live()) return;
+      frag.flush();
+    } catch (e) {
+      if (live()) halt(e);
+      return;
+    } finally {
+      if (track === activeAudio) backfilling = false;
+    }
+    if (pumpDone) {
+      eosPending = true;
+      runQueue();
     }
   }
 
@@ -193,15 +248,25 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       }
       for (const b of [vbuf, abuf]) b.addEventListener('updateend', runQueue);
       queue.unshift({ buf: vbuf, kind: 'append', data: initSegment(videoTrack) }, { buf: abuf, kind: 'append', data: initSegment(activeAudio) });
-      if (startAt > 0) {
-        ownSeekTarget = startAt;
-        try {
-          videoEl.currentTime = startAt;
-        } catch {}
+      // Restore the position once the element has metadata: a currentTime
+      // set before that (readyState HAVE_NOTHING) may be dropped, leaving
+      // the element at 0 with data only around startAt — a black stall.
+      const restore = () => {
+        if (ms !== m || disposed) return;
+        if (startAt > 0) {
+          ownSeekTarget = startAt;
+          try {
+            videoEl.currentTime = startAt;
+          } catch {}
+        }
+        if (resume) Promise.resolve(videoEl.play?.()).catch(() => {});
+      };
+      if (startAt > 0 || resume) {
+        if ((videoEl.readyState ?? 0) >= 1) restore();
+        else videoEl.addEventListener?.('loadedmetadata', restore, { once: true });
       }
       runQueue();
       pump(generation, startAt);
-      if (resume) Promise.resolve(videoEl.play?.()).catch(() => {});
     }, { once: true });
   }
 
@@ -255,11 +320,33 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       runQueue();
       pump(generation, sec);
     },
+    // Swap only the audio SourceBuffer's contents, video keeps playing:
+    // changeType() to the new codec, drop audio ahead of the playhead,
+    // backfill the new track up to where the pump has read, and the pump
+    // continues with the new track from there. Browsers without
+    // changeType get a MediaSource rebuild at the current position.
     setAudioTrack(trackNumber) {
       const t = trackList.find(x => playableAudio(x) && x.number === trackNumber);
       if (!t || t === activeAudio) return;
       activeAudio = t;
-      open(videoEl.currentTime || 0, !videoEl.paused);
+      if (!vbuf || !abuf) return; // not attached yet: attach() uses activeAudio
+      if (typeof abuf.changeType !== 'function') {
+        open(videoEl.currentTime || 0, !videoEl.paused);
+        return;
+      }
+      const from = videoEl.currentTime || 0;
+      const until = pumpDone ? Infinity : Math.max(pumpAt, from);
+      audioCutoff = until;
+      eosPending = false;
+      // Old-track fragments still queued would only be removed again.
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].buf === abuf) queue.splice(i, 1);
+      queue.push(
+        { buf: abuf, kind: 'changeType', mime: mime(t) },
+        { buf: abuf, kind: 'remove', from },
+        { buf: abuf, kind: 'append', data: initSegment(t) },
+      );
+      runQueue();
+      backfill(generation, t, from, until);
     },
     duration: () => demuxer.durationSec(),
     dispose() {

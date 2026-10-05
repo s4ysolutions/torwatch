@@ -202,3 +202,161 @@ test('finalizePlayback ends stream only when open, never throws', async () => {
     endOfStream: () => { throw new Error('InvalidStateError'); },
   }), false);
 });
+
+// --- strict MSE fake: throws InvalidStateError where the MSE spec does ---
+
+function invalidState(msg) {
+  return Object.assign(new Error(`The object is in an invalid state. (${msg})`), { name: 'InvalidStateError' });
+}
+
+function installStrictMse() {
+  const all = [];
+  class StrictSourceBuffer {
+    constructor(ms, mime) {
+      this.ms = ms; this.mime = mime; this.updating = false; this.op = null; this.l = {}; this.appended = [];
+    }
+    addEventListener(ev, fn) { (this.l[ev] ??= []).push(fn); }
+    _start(op) {
+      if (this.ms.readyState === 'closed') throw invalidState('closed');
+      if (this.updating) throw invalidState(`${op} while updating`);
+      if (this.ms.readyState === 'ended') this.ms.readyState = 'open';
+      this.updating = true; this.op = op;
+      setTimeout(() => { this.updating = false; this.op = null; for (const fn of this.l.updateend ?? []) fn(); }, 1);
+    }
+    appendBuffer(d) { this._start('append'); this.appended.push(d); }
+    remove() { this._start('remove'); }
+    abort() {
+      if (this.op === 'remove') throw invalidState('abort during remove');
+      if (this.ms.readyState !== 'open') throw invalidState('abort when not open');
+      this.updating = false; this.op = null;
+    }
+  }
+  class StrictMediaSource {
+    constructor() { this.readyState = 'closed'; this.sourceBuffers = []; this.l = {}; this._d = NaN; all.push(this); }
+    static isTypeSupported() { return true; }
+    addEventListener(ev, fn) { (this.l[ev] ??= []).push(fn); }
+    fire(ev) { if (ev === 'sourceopen') this.readyState = 'open'; for (const fn of this.l[ev] ?? []) fn(); }
+    get duration() { return this._d; }
+    set duration(v) {
+      if (this.readyState !== 'open' || this.sourceBuffers.some((b) => b.updating)) throw invalidState('duration');
+      this._d = v;
+    }
+    addSourceBuffer(mime) {
+      if (this.readyState !== 'open') throw invalidState('addSourceBuffer when not open');
+      const b = new StrictSourceBuffer(this, mime); this.sourceBuffers.push(b); return b;
+    }
+    removeSourceBuffer(b) { this.sourceBuffers = this.sourceBuffers.filter((x) => x !== b); }
+    endOfStream() {
+      if (this.readyState !== 'open' || this.sourceBuffers.some((b) => b.updating)) throw invalidState('endOfStream');
+      this.readyState = 'ended';
+    }
+  }
+  const prev = { MS: globalThis.MediaSource, c: URL.createObjectURL, r: URL.revokeObjectURL };
+  globalThis.MediaSource = StrictMediaSource;
+  let n = 0;
+  URL.createObjectURL = () => `blob:ms${++n}`;
+  URL.revokeObjectURL = () => {};
+  return {
+    all,
+    restore() { globalThis.MediaSource = prev.MS; URL.createObjectURL = prev.c; URL.revokeObjectURL = prev.r; },
+  };
+}
+
+function strictVideo() {
+  const l = {};
+  return {
+    src: null, currentTime: 0, paused: true, error: null, buffered: { length: 0 },
+    addEventListener(ev, fn) { (l[ev] ??= []).push(fn); },
+    removeEventListener() {},
+    fire(ev) { for (const fn of l[ev] ?? []) fn(); },
+    play() { this.paused = false; return Promise.resolve(); },
+    pause() { this.paused = true; },
+    removeAttribute() { this.src = null; },
+  };
+}
+
+const AVC = { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' };
+const AAC_A = { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'eng' };
+const AAC_B = { number: 3, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x11, 0x90]), language: 'rus' };
+
+// Demuxer yielding 1 video + 1 audio sample per second for 10s.
+const tenSeconds = {
+  durationSec: () => 10,
+  async *samples(from, _to, sel) {
+    for (let t = Math.floor(from); t < 10; t++) {
+      for (const n of sel) yield { trackNumber: n, timestamp: t, keyframe: true, data: new Uint8Array(8) };
+    }
+  },
+};
+const settle = (ms = 60) => new Promise((r) => setTimeout(r, ms));
+
+test('strict MSE: rapid seeks while buffers update never throw', async () => {
+  const env = installStrictMse();
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    const errors = [];
+    const player = createMsePlayer(video, tenSeconds, [AVC, AAC_A], { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    await settle(5);
+    // Drag the seek bar: seeks land while appends and removes are in flight.
+    // Back to back, as 'seeking' fires while dragging: later seeks land on
+    // buffers still running the previous seek's remove().
+    for (const t of [7, 3, 8, 2, 6]) assert.doesNotThrow(() => player.seek(t));
+    await settle(1);
+    for (const t of [4, 9]) assert.doesNotThrow(() => player.seek(t));
+    await settle();
+    assert.deepEqual(errors, []);
+    assert.equal(env.all[0].duration, 10); // finite duration: seek bar works
+    player.dispose();
+  } finally {
+    env.restore();
+  }
+});
+
+test('strict MSE: audio switch after end of stream rebuilds the MediaSource', async () => {
+  const env = installStrictMse();
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    const errors = [];
+    const player = createMsePlayer(video, tenSeconds, [AVC, AAC_A, AAC_B], { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    await settle();
+    assert.equal(env.all[0].readyState, 'ended'); // whole file appended
+    video.currentTime = 6;
+    video.paused = false;
+    player.setAudioTrack(3);
+    assert.equal(env.all.length, 2, 'new MediaSource');
+    assert.equal(video.src, 'blob:ms2');
+    env.all[1].fire('sourceopen');
+    await settle();
+    assert.deepEqual(errors, []);
+    const [v, a] = env.all[1].sourceBuffers;
+    assert.match(a.mime, /mp4a\.40\.2/);
+    assert.ok(v.appended.length > 1 && a.appended.length > 1, 'streams again');
+    assert.equal(video.currentTime, 6, 'kept the position');
+    assert.equal(video.paused, false, 'kept playing');
+    player.dispose();
+  } finally {
+    env.restore();
+  }
+});
+
+test('strict MSE: a decoder error is reported as such, not as invalid state', async () => {
+  const env = installStrictMse();
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const video = strictVideo();
+    const errors = [];
+    createMsePlayer(video, tenSeconds, [AVC, AAC_A], { onError: (e) => errors.push(e.message) });
+    env.all[0].fire('sourceopen');
+    video.error = { code: 4, message: 'Unsupported audio configuration' };
+    video.fire('error');
+    await settle();
+    assert.equal(errors.length, 1);
+    assert.match(errors[0], /media error 4: Unsupported audio configuration/);
+  } finally {
+    env.restore();
+  }
+});

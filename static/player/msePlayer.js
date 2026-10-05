@@ -1,38 +1,66 @@
 import { initSegment, fragment, codecString, decodeTime } from '../demux/fmp4Muxer.js';
 import { drainGroups, finalizePlayback } from './mseHelpers.js';
 
+// MSE player: demuxed MKV → fMP4 fragments → one video + one audio
+// SourceBuffer.
+//
+// Every SourceBuffer operation (appendBuffer and remove) goes through one
+// FIFO queue and starts only when its buffer is idle; abort() is never
+// used. That avoids the InvalidStateError cases of the MSE spec: abort()
+// during a remove(), append/remove while updating, endOfStream() while
+// updating.
+//
+// An audio switch rebuilds the whole MediaSource at the current position
+// instead of removeSourceBuffer + addSourceBuffer: browsers refuse new
+// SourceBuffers once playback has started or the stream has ended.
 export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
   const onError = typeof hooks.onError === 'function' ? hooks.onError : () => {};
   // Subtitle blocks ride along in the playback stream (no second walk of
   // the file); each one is handed to hooks.onSubtitle(sample).
   const onSubtitle = typeof hooks.onSubtitle === 'function' ? hooks.onSubtitle : null;
   const subtitleNums = onSubtitle ? trackList.filter(t => t.type === 'subtitle').map(t => t.number) : [];
-  // Halt the pipeline exactly once: stale every in-flight pump and drop
-  // queued appends so a dead demuxer/buffer can't cascade exceptions.
-  function halt(e) {
-    generation++;
-    queue.length = 0;
-    try {
-      onError(e);
-    } catch {}
-  }
-  const ms = new MediaSource();
-  videoEl.src = URL.createObjectURL(ms);
-  let vbuf = null, abuf = null;
   // Tracks the demuxer marked unplayable (codec the browser can't decode)
   // are never selected.
   const playableAudio = t => t.type === 'audio' && t.playable !== false;
   let activeAudio = trackList.find(playableAudio);
   const videoTrack = trackList.find(t => t.type === 'video');
-  let generation = 0; // bumped by seek/setAudioTrack to cancel stale pumps
-  const queue = [];   // pending appends: {buf, data}
-  let pumping = false;
-  let eosPending = false; // pump finished; endOfStream once queue drains
-  // Backpressure: pause the pump while too many appends are pending or
-  // >30s is buffered ahead; resume on updateend (plus a timeout fallback).
+
+  let ms = null;
+  let msUrl = null;
+  let vbuf = null, abuf = null;
+  let generation = 0; // bumped by seek/audio switch/halt to cancel stale pumps
+  const queue = []; // pending SourceBuffer ops: {buf, kind: 'append'|'remove', data?}
+  let eosPending = false; // pump finished; endOfStream once everything is idle
+  let halted = false;
+  let disposed = false;
+  let startAt = 0; // where the pump starts once the MediaSource opens
+  // Backpressure: pause the pump while too many ops are pending or >30s is
+  // buffered ahead; resume on updateend (plus a timeout fallback).
   const MAX_QUEUE = 32;
   const MAX_AHEAD_SEC = 30;
   let pressureResolve = null;
+
+  // Error text that says which step failed and, when the element itself
+  // failed (decoder rejected data), the media error behind it — WebKit
+  // reports every later append as a bare "invalid state".
+  function describe(what, e) {
+    const me = videoEl.error;
+    const media = me ? ` (media error ${me.code}${me.message ? `: ${me.message}` : ''})` : '';
+    return new Error(`${what} failed: ${e?.message ?? e}${media}`);
+  }
+
+  // Halt the pipeline once: stale every in-flight pump, drop queued ops,
+  // surface one error.
+  function halt(e) {
+    if (halted || disposed) return;
+    halted = true;
+    generation++;
+    queue.length = 0;
+    eosPending = false;
+    try {
+      onError(e);
+    } catch {}
+  }
 
   function bufferedAhead() {
     try {
@@ -45,24 +73,25 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
     }
   }
 
-  function appendNext() {
-    if (!queue.length) {
-      if (eosPending) { eosPending = false; finalizePlayback(ms); }
-      return;
+  const idle = () => !vbuf?.updating && !abuf?.updating;
+
+  function runQueue() {
+    while (queue.length) {
+      const op = queue[0];
+      if (op.buf.updating) break; // resumes on that buffer's updateend
+      queue.shift();
+      try {
+        if (op.kind === 'remove') op.buf.remove(0, Infinity);
+        else op.buf.appendBuffer(op.data);
+      } catch (e) {
+        halt(describe(op.kind === 'remove' ? 'SourceBuffer.remove' : 'SourceBuffer.appendBuffer', e));
+        return;
+      }
     }
-    const { buf, data } = queue[0];
-    if (!buf || buf.updating) return;
-    queue.shift();
-    try {
-      buf.appendBuffer(data);
-    } catch (e) {
-      halt(e);
-      return;
-    }
-    if (pressureResolve && queue.length < MAX_QUEUE) {
-      const r = pressureResolve;
-      pressureResolve = null;
-      r();
+    if (pressureResolve && queue.length < MAX_QUEUE) pressureResolve();
+    if (eosPending && !queue.length && idle()) {
+      eosPending = false;
+      finalizePlayback(ms);
     }
   }
 
@@ -90,14 +119,14 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       const track = tn === videoTrack.number ? videoTrack : activeAudio;
       const buf = tn === videoTrack.number ? vbuf : abuf;
       // tfdt is in the track's own timescale (90k video, sample rate audio).
-      queue.push({ buf, data: fragment(track, batch, decodeTime(track, batch[0].timestamp)) });
-      appendNext();
+      queue.push({ buf, kind: 'append', data: fragment(track, batch, decodeTime(track, batch[0].timestamp)) });
+      runQueue();
     };
     try {
       for await (const s of demuxer.samples(fromSec, demuxer.durationSec(), sel)) {
         if (gen !== generation) return; // stale
-        // Pause fetching while the append queue is full or plenty is
-        // buffered ahead; updateend (via appendNext) wakes us early.
+        // Pause fetching while the queue is full or plenty is buffered
+        // ahead; updateend (via runQueue) wakes us early.
         while (gen === generation && (queue.length >= MAX_QUEUE || bufferedAhead() > MAX_AHEAD_SEC)) {
           await waitForDrain();
         }
@@ -124,24 +153,58 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       // (gen now stale) skips flush/endOfStream, and surface one error.
       if (gen === generation) halt(e);
     } finally {
-      // Flush trailing partial groups, then endOfStream once drained.
+      // Flush trailing partial groups, then endOfStream once idle.
       if (gen === generation) {
         drainGroups(groups, emit);
-        if (!queue.length) finalizePlayback(ms);
-        else eosPending = true;
+        eosPending = true;
+        runQueue();
       }
     }
   }
 
-  function attach() {
-    const mime = t => `${t.type === 'video' ? 'video' : 'audio'}/mp4; codecs="${codecString(t)}"`;
-    vbuf = ms.addSourceBuffer(mime(videoTrack));
-    abuf = ms.addSourceBuffer(mime(activeAudio));
-    for (const b of [vbuf, abuf]) b.addEventListener('updateend', appendNext);
-    vbuf.appendBuffer(initSegment(videoTrack));
-    abuf.appendBuffer(initSegment(activeAudio));
+  const mime = t => `${t.type === 'video' ? 'video' : 'audio'}/mp4; codecs="${codecString(t)}"`;
+
+  // (Re)build the MediaSource and start streaming at sec.
+  function open(sec, resume) {
+    generation++;
+    queue.length = 0;
+    eosPending = false;
+    halted = false;
+    vbuf = abuf = null;
+    startAt = sec;
+    if (msUrl) URL.revokeObjectURL(msUrl);
+    const m = new MediaSource();
+    ms = m;
+    msUrl = URL.createObjectURL(m);
+    videoEl.src = msUrl;
+    m.addEventListener('sourceopen', () => {
+      if (ms !== m || disposed) return;
+      try {
+        // Without a duration the element reports an infinite (live)
+        // stream and the seek bar can't reach unbuffered positions. Set
+        // it before any SourceBuffer exists (the setter throws while one
+        // is updating).
+        const d = demuxer.durationSec();
+        if (Number.isFinite(d) && d > 0) m.duration = d;
+        vbuf = m.addSourceBuffer(mime(videoTrack));
+        abuf = m.addSourceBuffer(mime(activeAudio));
+      } catch (e) {
+        halt(describe('MediaSource.addSourceBuffer', e));
+        return;
+      }
+      for (const b of [vbuf, abuf]) b.addEventListener('updateend', runQueue);
+      queue.unshift({ buf: vbuf, kind: 'append', data: initSegment(videoTrack) }, { buf: abuf, kind: 'append', data: initSegment(activeAudio) });
+      if (startAt > 0) {
+        ownSeekTarget = startAt;
+        try {
+          videoEl.currentTime = startAt;
+        } catch {}
+      }
+      runQueue();
+      pump(generation, startAt);
+      if (resume) Promise.resolve(videoEl.play?.()).catch(() => {});
+    }, { once: true });
   }
-  ms.addEventListener('sourceopen', () => { attach(); pump(generation, videoEl.currentTime || 0); });
 
   // Native controls seek by setting currentTime. A target outside what is
   // buffered needs the pump restarted there; the pump otherwise walks on
@@ -160,7 +223,17 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
     if (!vbuf || !abuf || isBuffered(t)) return;
     api.seek(t);
   };
-  if (typeof videoEl.addEventListener === 'function') videoEl.addEventListener('seeking', onSeeking);
+  // The decoder rejected data: report that, not the next append's
+  // "invalid state".
+  const onMediaError = () => {
+    if (!videoEl.error || disposed) return;
+    const me = videoEl.error;
+    halt(new Error(`playback failed: media error ${me.code}${me.message ? `: ${me.message}` : ''}`));
+  };
+  if (typeof videoEl.addEventListener === 'function') {
+    videoEl.addEventListener('seeking', onSeeking);
+    videoEl.addEventListener('error', onMediaError);
+  }
 
   const api = {
     play: () => videoEl.play(),
@@ -169,51 +242,41 @@ export function createMsePlayer(videoEl, demuxer, trackList, hooks = {}) {
       generation++;
       eosPending = false;
       queue.length = 0;
+      ownSeekTarget = sec;
+      try {
+        videoEl.currentTime = sec;
+      } catch {}
       if (!vbuf || !abuf) {
-        // sourceopen hasn't fired yet — buffers aren't attached, so
-        // there is nothing to abort/remove/queue. Just move currentTime;
-        // the sourceopen pump starts from videoEl.currentTime.
-        try {
-          videoEl.currentTime = sec;
-        } catch {}
+        // MediaSource not open yet: the sourceopen pump starts here.
+        startAt = sec;
         return;
       }
-      for (const b of [vbuf, abuf]) if (b?.updating) b.abort();
-      vbuf.remove(0, Infinity);
-      abuf.remove(0, Infinity);
-      ownSeekTarget = sec;
-      videoEl.currentTime = sec;
-      // re-append init segments then pump from sec
-      queue.push({ buf: vbuf, data: initSegment(videoTrack) }, { buf: abuf, data: initSegment(activeAudio) });
-      appendNext();
+      // Queued, so they wait for any in-flight append instead of abort().
+      queue.push({ buf: vbuf, kind: 'remove' }, { buf: abuf, kind: 'remove' });
+      runQueue();
       pump(generation, sec);
     },
     setAudioTrack(trackNumber) {
       const t = trackList.find(x => playableAudio(x) && x.number === trackNumber);
       if (!t || t === activeAudio) return;
       activeAudio = t;
-      // Invalidate stale pumps, abort updating buffers, clear the
-      // pending queue — BEFORE removing the old audio buffer. Never append
-      // queued fragments to a removed (detached) buffer.
-      generation++;
-      for (const b of [vbuf, abuf]) if (b?.updating) b.abort();
-      queue.length = 0;
-      eosPending = false;
-      if (abuf) ms.removeSourceBuffer(abuf);
-      abuf = ms.addSourceBuffer(`audio/mp4; codecs="${codecString(t)}"`);
-      abuf.addEventListener('updateend', appendNext);
-      abuf.appendBuffer(initSegment(t));
-      pump(generation, videoEl.currentTime);
+      open(videoEl.currentTime || 0, !videoEl.paused);
     },
     duration: () => demuxer.durationSec(),
     dispose() {
+      disposed = true;
       generation++;
-      if (typeof videoEl.removeEventListener === 'function') videoEl.removeEventListener('seeking', onSeeking);
+      queue.length = 0;
       eosPending = false;
+      if (typeof videoEl.removeEventListener === 'function') {
+        videoEl.removeEventListener('seeking', onSeeking);
+        videoEl.removeEventListener('error', onMediaError);
+      }
       videoEl.pause();
-      URL.revokeObjectURL(videoEl.src);
+      if (msUrl) URL.revokeObjectURL(msUrl);
       videoEl.removeAttribute('src');
     },
   };
+  open(0, false);
   return api;
 }

@@ -99,6 +99,11 @@ function timescaleFor(track) {
   return 90000;
 }
 
+// Seconds -> integer ticks of the track's mdhd timescale (tfdt units).
+export function decodeTime(track, sec) {
+  return Math.round(sec * timescaleFor(track));
+}
+
 function hex(b, n = 2) {
   return b.toString(16).toLowerCase().padStart(n, '0');
 }
@@ -283,9 +288,12 @@ function estimateDuration(track, pts) {
   return track.type === 'audio' ? 1024 : Math.round(timescaleFor(track) / 25);
 }
 
+// baseDecodeTime is in the track's timescale (see decodeTime); rounded so
+// a fractional value can't reach BigInt in u64().
 export function fragment(track, samples, baseDecodeTime, seqNum = 1) {
   if (!samples.length) throw new Error('fragment needs at least one sample');
   const scale = timescaleFor(track);
+  baseDecodeTime = Math.round(baseDecodeTime);
   const pts = samples.map(s => Math.round(s.timestamp * scale));
   const dur = estimateDuration(track, pts);
   const durations = samples.map(() => dur);

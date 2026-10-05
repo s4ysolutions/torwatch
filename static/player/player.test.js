@@ -108,3 +108,65 @@ test('mse player skips unplayable audio tracks (attach + setAudioTrack)', async 
     delete globalThis.__lastMS;
   }
 });
+
+test('mse fragments carry tfdt in each track timescale (90k video, sample-rate audio)', async () => {
+  const appended = new Map(); // mime -> [Uint8Array]
+  const mkBuf = (mime) => ({
+    updating: false,
+    appendBuffer(d) { (appended.get(mime) ?? appended.set(mime, []).get(mime)).push(d); },
+    addEventListener() {},
+    remove() {},
+    abort() {},
+  });
+  globalThis.MediaSource = class {
+    constructor() { this._l = {}; this.readyState = 'open'; globalThis.__lastMS = this; }
+    addEventListener(ev, fn) { (this._l[ev] ??= []).push(fn); }
+    fire(ev) { for (const fn of this._l[ev] ?? []) fn(); }
+    addSourceBuffer(mime) { return mkBuf(mime); }
+    removeSourceBuffer() {}
+    endOfStream() {}
+  };
+  const origCreate = globalThis.URL.createObjectURL;
+  const origRevoke = globalThis.URL.revokeObjectURL;
+  globalThis.URL.createObjectURL = () => 'blob:fake';
+  globalThis.URL.revokeObjectURL = () => {};
+  const tfdtOf = (b) => {
+    for (let i = 0; i + 16 <= b.length; i++) {
+      if (b[i] === 0x74 && b[i + 1] === 0x66 && b[i + 2] === 0x64 && b[i + 3] === 0x74) {
+        return Number(new DataView(b.buffer, b.byteOffset).getBigUint64(i + 8));
+      }
+    }
+    return null;
+  };
+  try {
+    const { createMsePlayer } = await import('./msePlayer.js');
+    const videoEl = { src: null, currentTime: 0, buffered: { length: 0 }, play() {}, pause() {}, removeAttribute() {} };
+    // 1.009s: ms timestamp whose ×90000 / ×44100 products are not integers.
+    const demuxer = {
+      durationSec: () => 10,
+      async *samples() {
+        yield { trackNumber: 1, timestamp: 1.009, keyframe: true, data: new Uint8Array(8) };
+        yield { trackNumber: 2, timestamp: 1.009, keyframe: true, data: new Uint8Array(8) };
+      },
+    };
+    const tracks = [
+      { number: 1, type: 'video', codecId: 'V_MPEG4/ISO/AVC', codecPrivate: new Uint8Array([1, 100, 0, 12, 255]), language: 'und' },
+      // AAC-LC 44100 Hz
+      { number: 2, type: 'audio', codecId: 'A_AAC', codecPrivate: new Uint8Array([0x12, 0x10]), language: 'und' },
+    ];
+    let err = null;
+    const player = createMsePlayer(videoEl, demuxer, tracks, { onError: (e) => { err = e; } });
+    globalThis.__lastMS.fire('sourceopen');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(err, null);
+    const frag = (mime) => appended.get(mime).find((b) => tfdtOf(b) !== null);
+    assert.equal(tfdtOf(frag('video/mp4; codecs="avc1.64000c"')), Math.round(1.009 * 90000));
+    assert.equal(tfdtOf(frag('audio/mp4; codecs="mp4a.40.2"')), Math.round(1.009 * 44100));
+    player.dispose();
+  } finally {
+    globalThis.URL.createObjectURL = origCreate;
+    globalThis.URL.revokeObjectURL = origRevoke;
+    delete globalThis.MediaSource;
+    delete globalThis.__lastMS;
+  }
+});

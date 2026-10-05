@@ -443,3 +443,13 @@ test('setLastPlayed / getLastPlayed remember the episode per torrent', async () 
   assert.equal(getLastPlayed('t1'), 7);
   assert.equal(getLastPlayed('t2'), 0);
 });
+
+test('saveDuration keeps only real durations', async () => {
+  reset();
+  const { saveDuration, loadDuration } = await import('./loadMagnet.js');
+  saveDuration('t', 1, NaN);
+  saveDuration('t', 1, Infinity);
+  assert.equal(loadDuration('t', 1), 0);
+  saveDuration('t', 1, 1320.5);
+  assert.equal(loadDuration('t', 1), 1320.5);
+});

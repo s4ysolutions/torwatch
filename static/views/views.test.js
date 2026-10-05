@@ -235,3 +235,35 @@ test('filePickerView: Continue link, last watched marked and scrolled into view'
     assert.ok(!walk(c2).some((n) => n.className === 'picker-continue' || n.className === 'picker-last'));
   } finally { restore(); }
 });
+
+test('filePickerView: progress bars from position / duration, full when watched', async () => {
+  const { filePickerView } = await import('./filePickerView.js');
+  const restore = installStub();
+  try {
+    const container = makeStubEl('div');
+    const files = [
+      { index: 0, path: 'S/E01.mp4', size: 1 }, // watched
+      { index: 1, path: 'S/E02.mp4', size: 1 }, // half way, duration known
+      { index: 2, path: 'S/E03.mp4', size: 1 }, // started, no duration saved yet
+      { index: 3, path: 'S/E04.mp4', size: 1 }, // not started
+    ];
+    const pos = { 1: 660, 2: 30 };
+    filePickerView(container, {
+      files, hrefFor: (i) => `#${i}`,
+      positionOf: (i) => pos[i] ?? 0,
+      durationOf: (i) => (i === 1 ? 1320 : 0),
+      watchedOf: (i) => i === 0,
+    });
+    const text = (n) => (n.textContent || '') + (n.children ?? []).map(text).join('');
+    const rows = walk(container).filter((n) => n.tagName === 'LI');
+    const barOf = (li) => walk(li).find((n) => n.className === 'picker-progress');
+    const fillOf = (li) => walk(li).find((n) => n.className === 'picker-progress-fill')?.attrs.style;
+    assert.equal(fillOf(rows[0]), 'width:100.0%');
+    assert.equal(fillOf(rows[1]), 'width:50.0%');
+    assert.equal(barOf(rows[1]).attrs['aria-valuenow'], '50');
+    assert.match(text(rows[1]), /resume at 11:00 \/ 22:00/);
+    assert.equal(barOf(rows[2]), undefined, 'no duration yet → text only');
+    assert.match(text(rows[2]), /resume at 0:30$/);
+    assert.equal(barOf(rows[3]), undefined);
+  } finally { restore(); }
+});

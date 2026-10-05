@@ -43,6 +43,16 @@ export function loadPosition(id, fileIndex) {
   return history().get(`pos:${id}:${fileIndex}`, 0);
 }
 
+// Episode duration (s), saved once the player knows it: the picker's
+// progress bars are position / duration.
+export function saveDuration(id, fileIndex, sec) {
+  if (Number.isFinite(sec) && sec > 0) history().set(`dur:${id}:${fileIndex}`, sec);
+}
+
+export function loadDuration(id, fileIndex) {
+  return history().get(`dur:${id}:${fileIndex}`, 0);
+}
+
 // Last episode played per torrent (picker: "Continue", "last watched").
 export function setLastPlayed(id, fileIndex) {
   history().set(`last:${id}`, fileIndex);

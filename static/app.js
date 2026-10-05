@@ -30,6 +30,8 @@ import {
   isWatched,
   setLastPlayed,
   getLastPlayed,
+  saveDuration,
+  loadDuration,
 } from './usecases/loadMagnet.js';
 import { el } from './util/dom.js';
 import { playableFiles, nextFile, baseName, continueTarget } from './domain/files.js';
@@ -425,6 +427,10 @@ function mountPlay({ id: rawId, file }) {
   }
   on(bindPosition(video, id, fileIndex));
   const onEnded = () => markWatched(id, fileIndex);
+  // Duration for the picker's progress bar (finite once metadata is in).
+  const onDuration = () => saveDuration(id, fileIndex, video.duration);
+  video.addEventListener('durationchange', onDuration);
+  on(() => video.removeEventListener('durationchange', onDuration));
   video.addEventListener('ended', onEnded);
   on(() => video.removeEventListener('ended', onEnded));
   // Arrived here by auto-advance: start without waiting for ▶.
@@ -668,6 +674,7 @@ function mountFiles({ id: rawId }) {
         name: info.name,
         files: all,
         positionOf: (index) => loadPosition(id, index),
+        durationOf: (index) => loadDuration(id, index),
         watchedOf: (index) => isWatched(id, index),
         hrefFor: (index) => `#/play/${id}/${index}`,
         otherCount: all.length - playable.length,
